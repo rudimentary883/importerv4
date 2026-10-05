@@ -116,17 +116,82 @@
         .badge-bp { background: #e3f2fd; color: #1565c0; }
         .badge-3v3 { background: #f3e5f5; color: #7b1fa2; }
         .badge-wsdc { background: #e8f5e9; color: #2e7d32; }
+        .report-table td.num, .report-table th.num { text-align: center; }
+        .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+        .pill-new { background: #d4edda; color: #155724; }
+        .pill-old { background: #e9ecef; color: #495057; }
+        .pill-fail { background: #f8d7da; color: #721c24; }
+        .preview-banner {
+            background: #fff3cd; color: #856404; border: 1px solid #ffeaa7;
+            padding: 14px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 14px;
+        }
+        details { margin: 8px 0; font-size: 13px; }
+        details summary { cursor: pointer; font-weight: 600; }
+        details ul { margin: 6px 0 0; padding-left: 22px; max-height: 220px; overflow-y: auto; }
     </style>
 </head>
 <body>
     <h1>Import Results</h1>
 
-    {% if mode == 'api' %}
+    {% if dry_run %}
+    <div class="preview-banner">
+        <strong>Preview only &mdash; nothing was imported.</strong>
+        The report below shows what <em>would</em> be created and what already exists on your tab site.
+        Go back, untick &ldquo;Preview only&rdquo; and submit again to import the new entries.
+    </div>
+    {% endif %}
+
+    {% if report %}
     <div class="card">
-        <h2>API Import Summary</h2>
+        <h2>Batch Report {% if dry_run %}(preview){% endif %}</h2>
+        <table class="report-table">
+            <tr>
+                <th>Type</th>
+                <th class="num">In your files</th>
+                <th class="num">Already on the tab (skipped)</th>
+                <th class="num">{% if dry_run %}New (would import){% else %}New (imported){% endif %}</th>
+                <th class="num">Failed / not imported</th>
+            </tr>
+            {% for key, label, total in [('institutions','Institutions',inst_count),('teams','Teams',team_count),('adjudicators','Adjudicators',adj_count),('speakers','Speakers',speaker_count)] %}
+            <tr>
+                <td><strong>{{ label }}</strong></td>
+                <td class="num">{{ total }}</td>
+                <td class="num"><span class="pill pill-old">{{ report[key].existing|length }}</span></td>
+                <td class="num"><span class="pill pill-new">{{ report[key].created|length }}</span></td>
+                <td class="num"><span class="pill pill-fail">{{ report[key].failed|length }}</span></td>
+            </tr>
+            {% endfor %}
+        </table>
+
+        {% for key, label in [('institutions','Institutions'),('teams','Teams'),('adjudicators','Adjudicators'),('speakers','Speakers')] %}
+            {% if report[key].created %}
+            <details><summary>{{ label }} &mdash; {% if dry_run %}would be imported{% else %}imported{% endif %} ({{ report[key].created|length }})</summary>
+                <ul>{% for item in report[key].created[:200] %}<li>{{ item }}</li>{% endfor %}
+                {% if report[key].created|length > 200 %}<li>... and {{ report[key].created|length - 200 }} more</li>{% endif %}</ul>
+            </details>
+            {% endif %}
+            {% if report[key].existing %}
+            <details><summary>{{ label }} &mdash; already on the tab, skipped ({{ report[key].existing|length }})</summary>
+                <ul>{% for item in report[key].existing[:200] %}<li>{{ item }}</li>{% endfor %}
+                {% if report[key].existing|length > 200 %}<li>... and {{ report[key].existing|length - 200 }} more</li>{% endif %}</ul>
+            </details>
+            {% endif %}
+            {% if report[key].failed %}
+            <details open><summary style="color:#721c24;">{{ label }} &mdash; failed / not imported ({{ report[key].failed|length }})</summary>
+                <ul>{% for item, reason in report[key].failed[:100] %}<li>{{ item }} &mdash; <em>{{ reason }}</em></li>{% endfor %}
+                {% if report[key].failed|length > 100 %}<li>... and {{ report[key].failed|length - 100 }} more</li>{% endif %}</ul>
+            </details>
+            {% endif %}
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if mode == 'api' and not dry_run %}
+    <div class="card">
+        <h2>API Request Summary</h2>
         {% if api_results %}
         <div class="api-results {% if api_results.failed > 0 %}fail{% endif %}">
-            <strong>{{ api_results.success }}</strong> items created successfully &nbsp;|&nbsp;
+            <strong>{{ api_results.success }}</strong> API requests succeeded &nbsp;|&nbsp;
             <strong class="danger">{{ api_results.failed }}</strong> failed
             {% if api_results.errors %}
                 <br><br><strong>Errors:</strong>
@@ -148,15 +213,19 @@
 
     <div class="card">
         <h2>Download Tabbycat CSV Files</h2>
-        <p>Even in API mode, you can download these as backup or for manual import:</p>
-        <a href="/download/institutions" class="btn">📋 Institutions ({{ inst_count }})</a>
-        <a href="/download/adjudicators" class="btn">⚖️ Adjudicators ({{ adj_count }})</a>
-        <a href="/download/teams" class="btn">👥 Teams ({{ team_count }})</a>
-        <a href="/download/speakers" class="btn">🎤 Speakers ({{ speaker_count }})</a>
+        {% if report %}
+        <p>These contain only the <strong>new</strong> entries from this batch (handy for a manual import or as a backup):</p>
+        {% else %}
+        <p>Generated from your uploaded files, ready for Tabbycat's manual CSV import:</p>
+        {% endif %}
+        <a href="/download/{{ download_id }}/institutions" class="btn">📋 Institutions ({{ csv_counts.inst }})</a>
+        <a href="/download/{{ download_id }}/adjudicators" class="btn">⚖️ Adjudicators ({{ csv_counts.adj }})</a>
+        <a href="/download/{{ download_id }}/teams" class="btn">👥 Teams ({{ csv_counts.team }})</a>
+        <a href="/download/{{ download_id }}/speakers" class="btn">🎤 Speakers ({{ csv_counts.speaker }})</a>
     </div>
 
     <div class="card">
-        <h2>Data Preview <span class="format-badge badge-{{ debate_format }}">{{ debate_format|upper }} Format</span></h2>
+        <h2>Your Uploaded Data <span class="format-badge badge-{{ debate_format }}">{{ debate_format|upper }} Format</span></h2>
         
         <div class="stats">
             <div class="stat-box">
