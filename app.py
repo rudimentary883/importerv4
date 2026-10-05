@@ -1,6 +1,10 @@
 """
-Tabbycat API Importer v3.6 — FIXED: Speaker team URLs, category support,
-independent teams, and institution regions
+Tabbycat API Importer v4.0 — batch-aware ("dynamic") importing
+  * reads the institutions / teams / judges / speakers ALREADY on the tab site
+  * only imports entries that are NEW (safe to re-upload the same, updated .csv files)
+  * institutions file is optional: teams / judges can use institutions already on the site
+  * optional "preview only" mode that imports nothing
+v3.6 base: speaker team URLs, category support, independent teams, institution regions
 + WSDC support (3-5 speakers per team)
 """
 
@@ -10,7 +14,9 @@ import csv
 import json
 import time
 import re
+import uuid
 import requests
+from collections import OrderedDict
 
 from flask import Flask, render_template, request, send_file, flash, redirect, url_for, jsonify
 
@@ -22,6 +28,33 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 FORMAT_MAX_SPEAKERS = {'bp': 2, '3v3': 3, 'wsdc': 5}
 FORMAT_MIN_SPEAKERS = {'wsdc': 3}
 FORMAT_LABELS = {'bp': 'BP', '3v3': '3v3', 'wsdc': 'WSDC'}
+
+
+# Finished CSV downloads (kept server-side; cookies are far too small for this)
+DOWNLOAD_CACHE = OrderedDict()
+MAX_CACHED_DOWNLOADS = 8
+
+
+def norm(value):
+    """Normalise text for matching: trim, collapse spaces, ignore case."""
+    return re.sub(r'\s+', ' ', str(value if value is not None else '')).strip().casefold()
+
+
+def url_id(value, kind):
+    """Numeric id from an API hyperlink ('.../teams/42' -> 42). Accepts ints, digit strings, dicts."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, dict):
+        if value.get('id') is not None:
+            return url_id(value.get('id'), kind)
+        return url_id(value.get('url'), kind)
+    if isinstance(value, int):
+        return value
+    text = str(value).strip().rstrip('/')
+    if text.isdigit():
+        return int(text)
+    match = re.search(r'/%s/(\d+)' % re.escape(kind), text)
+    return int(match.group(1)) if match else None
 
 
 def clean_string(val):
@@ -271,6 +304,83 @@ class TabbycatAPI:
             diagnostics['suggestion'] = f'Connection error: {str(e)}.'
 
         return diagnostics
+
+
+    # ------------------------------------------------------------------
+    # v4.0: read what already exists on the tab site (GET only)
+    # ------------------------------------------------------------------
+    def _get_list(self, url):
+        """GET a list endpoint (follows pagination). Returns (items, error_message)."""
+        items = []
+        next_url = url
+        for _ in range(200):
+            try:
+                time.sleep(0.2)
+                resp = self.session.get(next_url, timeout=60)
+            except requests.exceptions.RequestException as e:
+                return None, str(e)[:150]
+            if resp.status_code != 200:
+                return None, f"HTTP {resp.status_code} on GET {next_url.replace(self.base_url, '')}"
+            try:
+                data = resp.json()
+            except ValueError:
+                return None, 'response was not JSON'
+            if isinstance(data, list):
+                items.extend(data)
+                return items, None
+            if isinstance(data, dict) and isinstance(data.get('results'), list):
+                items.extend(data['results'])
+                next_url = data.get('next')
+                if not next_url:
+                    return items, None
+                continue
+            return None, 'unexpected response shape'
+        return items, None
+
+    def load_existing(self, need_teams, need_adjudicators, need_speakers):
+        """
+        Read existing institutions / teams / adjudicators / speakers from the tab site.
+        Returns (existing_dict, problems). If a needed list cannot be read we report a
+        problem so the caller can stop instead of risking duplicates.
+        """
+        problems = []
+        existing = {'institutions': [], 'teams': [], 'adjudicators': [], 'speakers': []}
+
+        items, err = self._get_list(self._global_url('/institutions'))
+        if items is None:
+            items, err2 = self._get_list(self._tournament_url('/institutions'))
+            if items is None:
+                problems.append(f"institutions could not be read ({err})")
+        existing['institutions'] = items or []
+
+        if need_teams:
+            items, err = self._get_list(self._tournament_url('/teams'))
+            if items is None:
+                problems.append(f"teams could not be read ({err})")
+            existing['teams'] = items or []
+
+        if need_adjudicators:
+            items, err = self._get_list(self._tournament_url('/adjudicators'))
+            if items is None:
+                problems.append(f"adjudicators could not be read ({err})")
+            existing['adjudicators'] = items or []
+
+        if need_speakers:
+            items, err = self._get_list(self._tournament_url('/speakers'))
+            if items is not None:
+                existing['speakers'] = items
+            else:
+                # Fall back to the speakers nested inside each team, if they carry names
+                teams = existing['teams']
+                nested_ok = bool(teams) and all(
+                    isinstance(t.get('speakers'), list) and
+                    all(isinstance(sp, dict) and sp.get('name') for sp in t['speakers'])
+                    for t in teams)
+                if nested_ok:
+                    existing['speakers'] = []
+                else:
+                    problems.append(f"speakers could not be read ({err})")
+        return existing, problems
 
     def create_institution(self, name, code, region=''):
         if code in self.created_institutions:
@@ -565,6 +675,312 @@ def generate_speakers_csv(speakers):
 
 
 # =============================================================================
+# BATCH-AWARE IMPORT (v4.0)
+# =============================================================================
+
+class ImportAbort(Exception):
+    pass
+
+
+def new_report():
+    return {key: {'created': [], 'existing': [], 'failed': []}
+            for key in ('institutions', 'teams', 'adjudicators', 'speakers')}
+
+
+def build_institution_index(items, base_url):
+    """Index institutions already on the site by code and by name."""
+    index = {'by_code': {}, 'by_name': {}, 'by_id': {}}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        inst_id = item.get('id')
+        url = item.get('url') or ''
+        if inst_id is None:
+            inst_id = url_id(url, 'institutions')
+        if not url and inst_id is not None:
+            url = f"{base_url}/api/v1/institutions/{inst_id}"
+        entry = (inst_id, url)
+        if norm(item.get('code')):
+            index['by_code'][norm(item.get('code'))] = entry
+        if norm(item.get('name')):
+            index['by_name'][norm(item.get('name'))] = entry
+        if inst_id is not None:
+            index['by_id'][inst_id] = {'code': item.get('code') or '', 'name': item.get('name') or ''}
+    return index
+
+
+def find_existing_institution(index, code, name=''):
+    """Match a CSV institution (code or name, ignoring case/extra spaces) to one on the site."""
+    for key, table in ((norm(code), index['by_code']), (norm(name), index['by_name']),
+                       (norm(code), index['by_name']), (norm(name), index['by_code'])):
+        if key and key in table:
+            return table[key]
+    return None
+
+
+def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speakers, dry_run):
+    """
+    Compare the uploaded rows with what is already on the tab site and import only
+    what is new. Returns (report, new_rows).
+      report   -> per type: created / existing / failed lists (for the results page)
+      new_rows -> the uploaded rows that were new (used for the "new entries only" CSVs)
+    """
+    report = new_report()
+    new_rows = {'institutions': [], 'teams': [], 'adjudicators': [], 'speakers': []}
+
+    existing, problems = api.load_existing(
+        need_teams=bool(teams or speakers),
+        need_adjudicators=bool(adjudicators),
+        need_speakers=bool(speakers))
+    if problems:
+        raise ImportAbort('Could not read the existing entries from the tab site (' + '; '.join(problems) +
+                          '). Nothing was imported, to avoid creating duplicates. '
+                          'Check the API token has admin access and try again.')
+
+    def failure_reason(errors_before):
+        if len(api.stats['errors']) > errors_before:
+            return api.stats['errors'][-1]
+        return 'request failed'
+
+    # ------------------------------------------------------------------ institutions
+    inst_index = build_institution_index(existing['institutions'], api.base_url)
+    resolved = {}   # norm(code) -> (id, url) for institutions in the uploaded file / already on site
+
+    for inst in institutions:
+        label = f"{inst['name']} ({inst['code']})"
+        found = find_existing_institution(inst_index, inst['code'], inst['name'])
+        if found:
+            resolved[norm(inst['code'])] = found
+            report['institutions']['existing'].append(label)
+            continue
+        if dry_run:
+            resolved[norm(inst['code'])] = (f"new:{norm(inst['code'])}", f"new:{norm(inst['code'])}")
+            report['institutions']['created'].append(label)
+            new_rows['institutions'].append(inst)
+            continue
+        before = len(api.stats['errors'])
+        url = api.create_institution(inst['name'], inst['code'], inst.get('region', ''))
+        if url:
+            resolved[norm(inst['code'])] = (url_id(url, 'institutions'), url)
+            report['institutions']['created'].append(label)
+            new_rows['institutions'].append(inst)
+        else:
+            report['institutions']['failed'].append((label, failure_reason(before)))
+
+    def resolve_institution(code):
+        """-> (inst_id, inst_url, status) where status is 'blank', 'ok' or 'missing'."""
+        if not code:
+            return None, None, 'blank'
+        key = norm(code)
+        if key in resolved:
+            return resolved[key][0], resolved[key][1], 'ok'
+        found = find_existing_institution(inst_index, code, code)
+        if found:
+            resolved[key] = found
+            return found[0], found[1], 'ok'
+        return None, None, 'missing'
+
+    # ------------------------------------------------------------------ teams
+    team_index = {}            # (institution id or None, norm(reference)) -> team url
+    team_alias_site = {}       # norm(team name) -> team url  (teams already on the site)
+    team_alias_csv = {}        # norm(team name) -> team url  (teams in the uploaded file)
+    team_url_by_id = {}
+    speaker_names = {}         # team url -> set of norm(speaker name) already attached
+
+    for t in existing['teams']:
+        if not isinstance(t, dict):
+            continue
+        t_id = t.get('id') if t.get('id') is not None else url_id(t.get('url'), 'teams')
+        t_url = (t.get('url') or '').rstrip('/') or f"{api.base_url}/api/v1/tournaments/{api.slug}/teams/{t_id}"
+        if t_id is not None:
+            team_url_by_id[t_id] = t_url
+        inst_id = url_id(t.get('institution'), 'institutions')
+        team_index[(inst_id, norm(t.get('reference')))] = t_url
+        inst_info = inst_index['by_id'].get(inst_id, {})
+        names = {t.get('short_name'), t.get('long_name'), t.get('reference')}
+        for prefix in (inst_info.get('code'), inst_info.get('name')):
+            if prefix:
+                names.add(f"{prefix} {t.get('reference')}")
+                if t.get('short_reference'):
+                    names.add(f"{prefix} {t.get('short_reference')}")
+        for name in names:
+            if norm(name):
+                team_alias_site.setdefault(norm(name), t_url)
+        speaker_names.setdefault(t_url, set())
+        for sp in (t.get('speakers') or []):
+            if isinstance(sp, dict) and sp.get('name'):
+                speaker_names[t_url].add(norm(sp['name']))
+
+    for sp in existing['speakers']:
+        if not isinstance(sp, dict):
+            continue
+        t_ref = sp.get('team')
+        t_id = url_id(t_ref, 'teams')
+        t_url = team_url_by_id.get(t_id) or (str(t_ref).rstrip('/') if t_ref else None)
+        if t_url and sp.get('name'):
+            speaker_names.setdefault(t_url, set()).add(norm(sp['name']))
+
+    for team in teams:
+        code = team['institution']
+        inst_id, inst_url, status = resolve_institution(code)
+        default_name = f"{code or 'Independent'} {team['reference']}"
+        label = default_name if not team['team_name_human'] else f"{team['team_name_human']} [{default_name}]"
+        if status == 'missing':
+            report['teams']['failed'].append(
+                (label, f"institution '{code}' was not found in your institutions file or on the tab site"))
+            continue
+        key = (inst_id if status == 'ok' else None, norm(team['reference']))
+        site_url = team_index.get(key)
+        names_for_team = {norm(default_name)}
+        if team['team_name_human']:
+            names_for_team.add(norm(team['team_name_human']))
+
+        if site_url:
+            for n in names_for_team:
+                team_alias_csv[n] = site_url
+            report['teams']['existing'].append(label)
+            continue
+
+        if dry_run:
+            fake_url = f"new-team:{norm(default_name)}"
+            for n in names_for_team:
+                team_alias_csv[n] = fake_url
+            speaker_names.setdefault(fake_url, set())
+            report['teams']['created'].append(label)
+            new_rows['teams'].append(team)
+            continue
+
+        before = len(api.stats['errors'])
+        result = api.create_team(
+            institution_url=inst_url,
+            reference=team['reference'],
+            short_reference=team['short_reference'],
+            use_institution_prefix=team['use_institution_prefix'],
+            emoji=team['emoji'],
+            code_name=team['code_name'],
+            speakers=None)
+        if result and 'id' in result:
+            t_url = (result.get('url') or '').rstrip('/') or f"{api.base_url}/api/v1/tournaments/{api.slug}/teams/{result['id']}"
+            team_index[key] = t_url
+            speaker_names.setdefault(t_url, set())
+            for n in names_for_team:
+                team_alias_csv[n] = t_url
+            report['teams']['created'].append(label)
+            new_rows['teams'].append(team)
+        else:
+            report['teams']['failed'].append((label, failure_reason(before)))
+
+    # ------------------------------------------------------------------ speaker categories
+    category_map = {}
+    if speakers and not dry_run:
+        existing_cats = api.get_speaker_categories()
+        if isinstance(existing_cats, list):
+            for cat in existing_cats:
+                if isinstance(cat, dict) and 'name' in cat:
+                    cat_url = (cat.get('url') or '').rstrip('/')
+                    if not cat_url and 'id' in cat:
+                        cat_url = f"{api.base_url}/api/v1/tournaments/{api.slug}/speaker-categories/{cat['id']}"
+                    category_map[cat['name']] = cat_url
+
+            needed = set()
+            for spk in speakers:
+                for cat_name in [c.strip() for c in (spk.get('categories') or '').split(',')]:
+                    if cat_name and cat_name not in category_map:
+                        needed.add(cat_name)
+            for cat_name in needed:
+                result = api.create_speaker_category(cat_name)
+                if result:
+                    cat_url = (result.get('url') or '').rstrip('/')
+                    if not cat_url and 'id' in result:
+                        cat_url = f"{api.base_url}/api/v1/tournaments/{api.slug}/speaker-categories/{result['id']}"
+                    category_map[cat_name] = cat_url
+
+    # ------------------------------------------------------------------ speakers
+    for spk in speakers:
+        label = f"{spk['name']} ({spk['team']})"
+        t_key = norm(spk['team'])
+        t_url = team_alias_csv.get(t_key) or team_alias_site.get(t_key)
+        if not t_url:
+            report['speakers']['failed'].append((label, f"team '{spk['team']}' was not found in your teams file or on the tab site"))
+            continue
+        names = speaker_names.setdefault(t_url, set())
+        if norm(spk['name']) in names:
+            report['speakers']['existing'].append(label)
+            continue
+        if max_speakers and len(names) >= max_speakers:
+            report['speakers']['failed'].append((label, f"team already has {len(names)} speakers (limit for this format is {max_speakers})"))
+            continue
+
+        if dry_run:
+            names.add(norm(spk['name']))
+            report['speakers']['created'].append(label)
+            new_rows['speakers'].append(spk)
+            continue
+
+        cat_urls = []
+        for cat_name in [c.strip() for c in (spk.get('categories') or '').split(',')]:
+            if cat_name in category_map:
+                cat_urls.append(category_map[cat_name])
+        before = len(api.stats['errors'])
+        result = api.create_speaker(team_url=t_url, name=spk['name'], email=spk.get('email', ''),
+                                    gender=spk.get('gender', ''), categories=cat_urls)
+        if result:
+            names.add(norm(spk['name']))
+            report['speakers']['created'].append(label)
+            new_rows['speakers'].append(spk)
+        else:
+            report['speakers']['failed'].append((label, failure_reason(before)))
+
+    # ------------------------------------------------------------------ adjudicators
+    adj_keys = set()
+    adj_emails = set()
+    for a in existing['adjudicators']:
+        if not isinstance(a, dict):
+            continue
+        adj_keys.add((norm(a.get('name')), url_id(a.get('institution'), 'institutions')))
+        if norm(a.get('email')):
+            adj_emails.add(norm(a.get('email')))
+
+    for adj in adjudicators:
+        code = adj['institution']
+        inst_id, inst_url, status = resolve_institution(code)
+        label = f"{adj['name']} ({code})" if code else f"{adj['name']} (independent)"
+        if status == 'missing':
+            report['adjudicators']['failed'].append(
+                (label, f"institution '{code}' was not found in your institutions file or on the tab site"))
+            continue
+        key = (norm(adj['name']), inst_id if status == 'ok' else None)
+        email_key = norm(adj.get('email'))
+        if key in adj_keys or (email_key and email_key in adj_emails):
+            report['adjudicators']['existing'].append(label)
+            continue
+
+        if dry_run:
+            adj_keys.add(key)
+            if email_key:
+                adj_emails.add(email_key)
+            report['adjudicators']['created'].append(label)
+            new_rows['adjudicators'].append(adj)
+            continue
+
+        before = len(api.stats['errors'])
+        result = api.create_adjudicator(
+            name=adj['name'], institution_url=inst_url, email=adj['email'], gender=adj['gender'],
+            base_score=adj['base_score'], independent=adj['independent'],
+            adj_core=adj['adj_core'], notes=adj['notes'])
+        if result:
+            adj_keys.add(key)
+            if email_key:
+                adj_emails.add(email_key)
+            report['adjudicators']['created'].append(label)
+            new_rows['adjudicators'].append(adj)
+        else:
+            report['adjudicators']['failed'].append((label, failure_reason(before)))
+
+    return report, new_rows
+
+
+# =============================================================================
 # FLASK ROUTES
 # =============================================================================
 
@@ -587,6 +1003,26 @@ def test_connection():
     return jsonify(diagnostics)
 
 
+@app.route('/existing', methods=['POST'])
+def existing_summary():
+    """Show how many institutions / teams / judges / speakers are already on the tab site."""
+    data = request.get_json() or {}
+    try:
+        api = TabbycatAPI(data.get('base_url', ''), data.get('token', ''), data.get('slug', ''),
+                          username=data.get('username') or None, password=data.get('password') or None)
+        existing, problems = api.load_existing(True, True, True)
+        counts = {
+            'institutions': len(existing['institutions']),
+            'teams': len(existing['teams']),
+            'adjudicators': len(existing['adjudicators']),
+            'speakers': len(existing['speakers']) or sum(len(t.get('speakers') or []) for t in existing['teams']
+                                                         if isinstance(t, dict)),
+        }
+        return jsonify({'ok': not problems, 'counts': counts, 'problems': problems})
+    except Exception as e:
+        return jsonify({'ok': False, 'counts': {}, 'problems': [str(e)]})
+
+
 @app.route('/api-diagnose', methods=['POST'])
 def api_diagnose():
     data = request.get_json()
@@ -597,7 +1033,7 @@ def api_diagnose():
     results = []
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'TabbycatImporter/3.6 (Diagnostic)',
+        'User-Agent': 'TabbycatImporter/4.0 (Diagnostic)',
         'Accept': 'application/json'
     })
     if token:
@@ -615,10 +1051,7 @@ def api_diagnose():
     for method, path in paths_to_try:
         url = f"{base_url}{path}"
         try:
-            if method == 'GET':
-                resp = session.get(url, timeout=10)
-            else:
-                resp = session.post(url, json={'test': 'data'}, timeout=10)
+            resp = session.get(url, timeout=10)
             results.append({
                 'method': method,
                 'url': url,
@@ -636,54 +1069,47 @@ def api_diagnose():
     return jsonify({'results': results})
 
 
+def read_optional_upload(field):
+    f = request.files.get(field)
+    if f and f.filename:
+        return read_uploaded_file(f)
+    return None
+
+
 @app.route('/upload', methods=['POST'])
 def upload():
     mode = request.form.get('mode', 'csv')
     debate_format = request.form.get('debate_format', 'bp')
     max_speakers = FORMAT_MAX_SPEAKERS.get(debate_format, 3)
+    dry_run = request.form.get('dry_run') == 'on'
 
     try:
-        if 'institutions' not in request.files:
-            flash('Institutions file is required', 'error')
+        inst_rows = read_optional_upload('institutions')
+        adj_rows = read_optional_upload('adjudicators')
+        team_rows = read_optional_upload('teams')
+        speaker_rows = read_optional_upload('speakers')
+
+        if all(rows is None for rows in (inst_rows, adj_rows, team_rows, speaker_rows)):
+            flash('Please upload at least one file (institutions, adjudicators, teams or speakers).', 'error')
             return redirect(url_for('index'))
 
-        inst_file = request.files['institutions']
-        adj_file = request.files.get('adjudicators')
-        teams_file = request.files.get('teams')
-        speakers_file = request.files.get('speakers')
+        institutions, inst_errors = process_institutions(inst_rows) if inst_rows is not None else ([], [])
+        adjudicators, adj_errors = process_adjudicators(adj_rows) if adj_rows is not None else ([], [])
+        teams, team_errors = process_teams(team_rows) if team_rows is not None else ([], [])
+        speakers, speaker_errors = (process_speakers(speaker_rows, max_speakers=max_speakers, debate_format=debate_format)
+                                    if speaker_rows is not None else ([], []))
 
-        if inst_file.filename == '':
-            flash('Institutions file is required', 'error')
-            return redirect(url_for('index'))
-
-        inst_rows = read_uploaded_file(inst_file)
-        institutions, inst_errors = process_institutions(inst_rows)
-        institution_codes = {i['code'] for i in institutions}
-
-        adjudicators = []
-        adj_errors = []
-        teams = []
-        team_errors = []
-        speakers = []
-        speaker_errors = []
-
-        if adj_file and adj_file.filename:
-            adj_rows = read_uploaded_file(adj_file)
-            adjudicators, adj_errors = process_adjudicators(adj_rows)
-
-        if teams_file and teams_file.filename:
-            team_rows = read_uploaded_file(teams_file)
-            teams, team_errors = process_teams(team_rows)
+        # CSV-only mode has no tab site to look at: check institution codes against the file, if there is one.
+        if mode != 'api' and institutions:
+            institution_codes = {i['code'] for i in institutions}
             for t in teams:
-                # Independent teams: skip validation when institution is blank
                 if t['institution'] and t['institution'] not in institution_codes:
                     team_errors.append(f"Team '{t['institution']} {t['reference']}': institution code '{t['institution']}' not found in institutions file")
 
-        if speakers_file and speakers_file.filename:
-            speaker_rows = read_uploaded_file(speakers_file)
-            speakers, speaker_errors = process_speakers(speaker_rows, max_speakers=max_speakers, debate_format=debate_format)
-
         api_results = None
+        report = None
+        new_rows = None
+
         if mode == 'api':
             base_url = request.form.get('api_url', '').strip()
             token = request.form.get('api_token', '').strip()
@@ -704,119 +1130,36 @@ def upload():
                     flash(f"  {step['step']}: HTTP {step.get('status', 'ERR')}", 'info')
                 return redirect(url_for('index'))
 
-            # Step 1: Create institutions (GLOBAL endpoint)
-            for inst in institutions:
-                api.create_institution(inst['name'], inst['code'], inst.get('region', ''))
-
-            # Step 2: Create teams (TOURNAMENT endpoint)
-            # v3.6: Store team URLs to avoid DRF hyperlink mismatches.
-            created_teams = {}  # team_name -> team_url
-            for team in teams:
-                # Independent teams: pass None when institution is blank
-                inst_url = api.created_institutions.get(team['institution']) if team['institution'] else None
-                team_name = team['team_name_human'] or f"{team['institution'] or 'Independent'} {team['reference']}"
-
-                result = api.create_team(
-                    institution_url=inst_url,
-                    reference=team['reference'],
-                    short_reference=team['short_reference'],
-                    use_institution_prefix=team['use_institution_prefix'],
-                    emoji=team['emoji'],
-                    code_name=team['code_name'],
-                    speakers=None  # v3.6: create speakers separately to support categories
-                )
-
-                if result and 'id' in result:
-                    team_id = result['id']
-                    # Prefer API-returned URL; strip trailing slashes for DRF safety
-                    team_url = result.get('url', '').rstrip('/')
-                    if not team_url:
-                        team_url = f"{api.base_url}/api/v1/tournaments/{api.slug}/teams/{team_id}"
-                    created_teams[team_name] = team_url
-
-            # Step 3: Fetch / create speaker categories
-            category_map = {}  # category_name -> category_url
-            if speakers:
-                existing_cats = api.get_speaker_categories()
-                if isinstance(existing_cats, list):
-                    for cat in existing_cats:
-                        if isinstance(cat, dict) and 'name' in cat:
-                            cat_url = cat.get('url', '').rstrip('/')
-                            if not cat_url and 'id' in cat:
-                                cat_url = f"{api.base_url}/api/v1/tournaments/{api.slug}/speaker-categories/{cat['id']}"
-                            category_map[cat['name']] = cat_url
-
-                    # Determine which categories need to be created
-                    needed_cats = set()
-                    for spk in speakers:
-                        cat_str = spk.get('categories', '')
-                        if cat_str:
-                            for cat_name in [c.strip() for c in cat_str.split(',')]:
-                                if cat_name and cat_name not in category_map:
-                                    needed_cats.add(cat_name)
-
-                    for cat_name in needed_cats:
-                        result = api.create_speaker_category(cat_name)
-                        if result:
-                            cat_url = result.get('url', '').rstrip('/')
-                            if not cat_url and 'id' in result:
-                                cat_url = f"{api.base_url}/api/v1/tournaments/{api.slug}/speaker-categories/{result['id']}"
-                            category_map[cat_name] = cat_url
-
-            # Step 4: Create speakers separately with proper team URLs & categories
-            if speakers:
-                for spk in speakers:
-                    team_name = spk['team']
-                    team_url = created_teams.get(team_name)
-                    if not team_url:
-                        api.stats['errors'].append(
-                            f"Speaker '{spk['name']}': team '{team_name}' not found"
-                        )
-                        api.stats['failed'] += 1
-                        continue
-
-                    # Build category URL list
-                    cat_urls = []
-                    cat_str = spk.get('categories', '')
-                    if cat_str:
-                        for cat_name in [c.strip() for c in cat_str.split(',')]:
-                            if cat_name in category_map:
-                                cat_urls.append(category_map[cat_name])
-
-                    api.create_speaker(
-                        team_url=team_url,
-                        name=spk['name'],
-                        email=spk.get('email', ''),
-                        gender=spk.get('gender', ''),
-                        categories=cat_urls
-                    )
-
-            # Step 5: Create adjudicators (TOURNAMENT endpoint)
-            for adj in adjudicators:
-                inst_url = api.created_institutions.get(adj['institution']) if adj['institution'] else None
-                api.create_adjudicator(
-                    name=adj['name'],
-                    institution_url=inst_url,
-                    email=adj['email'],
-                    gender=adj['gender'],
-                    base_score=adj['base_score'],
-                    independent=adj['independent'],
-                    adj_core=adj['adj_core'],
-                    notes=adj['notes']
-                )
+            try:
+                report, new_rows = run_batch_import(api, institutions, teams, adjudicators, speakers,
+                                                    max_speakers, dry_run)
+            except ImportAbort as e:
+                flash(str(e), 'error')
+                return redirect(url_for('index'))
 
             api_results = api.stats
 
-        inst_csv = generate_institutions_csv(institutions)
-        adj_csv = generate_adjudicators_csv(adjudicators)
-        teams_csv = generate_teams_csv(teams)
-        speakers_csv = generate_speakers_csv(speakers)
+        # CSV downloads: in API mode only the NEW entries (handy for a manual import of this batch)
+        if new_rows is not None:
+            csv_institutions, csv_teams = new_rows['institutions'], new_rows['teams']
+            csv_adjudicators, csv_speakers = new_rows['adjudicators'], new_rows['speakers']
+        else:
+            csv_institutions, csv_teams, csv_adjudicators, csv_speakers = institutions, teams, adjudicators, speakers
 
-        from flask import session
-        session['institutions_csv'] = inst_csv
-        session['adjudicators_csv'] = adj_csv
-        session['teams_csv'] = teams_csv
-        session['speakers_csv'] = speakers_csv
+        download_id = uuid.uuid4().hex
+        DOWNLOAD_CACHE[download_id] = {
+            'institutions': generate_institutions_csv(csv_institutions),
+            'adjudicators': generate_adjudicators_csv(csv_adjudicators),
+            'teams': generate_teams_csv(csv_teams),
+            'speakers': generate_speakers_csv(csv_speakers),
+        }
+        while len(DOWNLOAD_CACHE) > MAX_CACHED_DOWNLOADS:
+            DOWNLOAD_CACHE.popitem(last=False)
+
+        counts = {
+            'inst': len(csv_institutions), 'adj': len(csv_adjudicators),
+            'team': len(csv_teams), 'speaker': len(csv_speakers),
+        }
 
         return render_template('results.html',
                                institutions=institutions,
@@ -831,7 +1174,11 @@ def upload():
                                adj_count=len(adjudicators),
                                team_count=len(teams),
                                speaker_count=len(speakers),
+                               csv_counts=counts,
+                               download_id=download_id,
                                mode=mode,
+                               dry_run=dry_run,
+                               report=report,
                                debate_format=debate_format,
                                api_results=api_results)
 
@@ -840,22 +1187,14 @@ def upload():
         return redirect(url_for('index'))
 
 
-@app.route('/download/<file_type>')
-def download(file_type):
-    from flask import session
-    files = {
-        'institutions': ('institutions.csv', session.get('institutions_csv', '')),
-        'adjudicators': ('adjudicators.csv', session.get('adjudicators_csv', '')),
-        'teams': ('teams.csv', session.get('teams_csv', '')),
-        'speakers': ('speakers.csv', session.get('speakers_csv', ''))
-    }
-    if file_type not in files:
-        flash('Invalid file type', 'error')
+@app.route('/download/<download_id>/<file_type>')
+def download(download_id, file_type):
+    bundle = DOWNLOAD_CACHE.get(download_id)
+    if not bundle or file_type not in bundle:
+        flash('That download has expired. Please run the import again.', 'error')
         return redirect(url_for('index'))
-
-    filename, content = files[file_type]
-    buffer = io.BytesIO(content.encode('utf-8'))
-    return send_file(buffer, mimetype='text/csv', as_attachment=True, download_name=filename)
+    buffer = io.BytesIO(bundle[file_type].encode('utf-8'))
+    return send_file(buffer, mimetype='text/csv', as_attachment=True, download_name=f'{file_type}.csv')
 
 
 if __name__ == '__main__':
