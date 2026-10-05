@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tabbycat Importer v3.1</title>
+    <title>Tabbycat Importer v4.0</title>
     <style>
         * { box-sizing: border-box; }
         body {
@@ -161,6 +161,16 @@
             border-radius: 0 0 4px 4px;
             font-size: 12px;
         }
+        .batch-info {
+            background: #eaf2fb;
+            border-left: 4px solid #4a90d9;
+            padding: 12px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-bottom: 10px;
+        }
+        .batch-check { display: flex; gap: 8px; align-items: flex-start; font-weight: normal; margin-top: 15px; cursor: pointer; }
+        .batch-check input { margin-top: 5px; }
         .two-col {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -172,8 +182,8 @@
     </style>
 </head>
 <body>
-    <h1>Tabbycat Importer <span style="font-size:14px;color:#888;">v3.1</span></h1>
-    <p class="subtitle">Import institutions, teams, speakers, and adjudicators into Tabbycat</p>
+    <h1>Tabbycat Importer <span style="font-size:14px;color:#888;">v4.0</span></h1>
+    <p class="subtitle">Import institutions, teams, speakers, and adjudicators into Tabbycat &mdash; in as many batches as you need</p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
@@ -256,19 +266,33 @@
 
             <div style="margin-top:15px;">
                 <button type="button" class="btn btn-secondary" onclick="testConnection()">Test Connection</button>
+                <button type="button" class="btn btn-secondary" style="margin-left:8px;" onclick="checkExisting()">Check What's Already on the Tab</button>
                 <button type="button" class="btn btn-danger" style="margin-left:8px;" onclick="deepDiagnose()">Deep Diagnose</button>
             </div>
+            <label class="batch-check">
+                <input type="checkbox" name="dry_run" id="dry_run">
+                <span><strong>Preview only</strong> &mdash; compare my files with the tab site and show what <em>would</em> be imported, but import nothing.</span>
+            </label>
             <div id="test_result" class="test-result"></div>
             <div id="diagnose_result" class="test-result info"></div>
         </div>
 
         <div class="card">
             <h2>3. Upload Your Data Files</h2>
+
+            <div class="batch-info">
+                <strong>Importing in batches?</strong> In Direct API Import mode the importer first reads what is already on your tab site.
+                Anything that already exists (same institution code/name, same team, same judge, same speaker on the same team) is
+                <strong>skipped</strong>, and only the <strong>new</strong> entries are imported. So you can upload the same,
+                updated .csv files again and again, or upload only the new rows. Every file is optional: you can import just a few
+                teams or judges into institutions that are already on the site without uploading the institutions file.
+            </div>
             
-            <div class="file-section required">
-                <h3>📋 Institutions (REQUIRED)</h3>
-                <p class="hint">Columns: <code>name, code</code> — Code is the short name used in other files (e.g., UNSW, ANU)</p>
-                <input type="file" name="institutions" accept=".csv,.xlsx,.xls" required>
+            <div class="file-section">
+                <h3>📋 Institutions (optional)</h3>
+                <p class="hint">Columns: <code>name, code</code> — Code is the short name used in other files (e.g., UNSW, ANU).
+                Only needed for <strong>new</strong> institutions. Teams and judges can use institutions that are already on the tab site.</p>
+                <input type="file" name="institutions" accept=".csv,.xlsx,.xls">
             </div>
 
             <div class="file-section">
@@ -366,6 +390,43 @@
                         }
                     }
                     resultDiv.innerHTML = html;
+                }
+            } catch (e) {
+                resultDiv.className = 'test-result fail';
+                resultDiv.textContent = 'Network error: ' + e.message;
+            }
+        }
+
+        async function checkExisting() {
+            const resultDiv = document.getElementById('test_result');
+            document.getElementById('diagnose_result').style.display = 'none';
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'test-result info';
+            resultDiv.textContent = 'Reading existing entries from the tab site...';
+            const payload = {
+                base_url: document.getElementById('api_url').value,
+                token: document.getElementById('api_token').value,
+                slug: document.getElementById('tournament_slug').value,
+                username: document.getElementById('api_username').value,
+                password: document.getElementById('api_password').value
+            };
+            try {
+                const resp = await fetch('/existing', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    const c = data.counts;
+                    resultDiv.className = 'test-result ok';
+                    resultDiv.innerHTML = `<strong>Already on the tab site:</strong><ul>
+                        <li>${c.institutions} institutions</li><li>${c.teams} teams</li>
+                        <li>${c.adjudicators} adjudicators</li><li>${c.speakers} speakers</li></ul>`;
+                } else {
+                    resultDiv.className = 'test-result fail';
+                    resultDiv.innerHTML = '<strong>Could not read everything:</strong><ul>' +
+                        (data.problems || []).map(p => `<li>${p}</li>`).join('') + '</ul>';
                 }
             } catch (e) {
                 resultDiv.className = 'test-result fail';
