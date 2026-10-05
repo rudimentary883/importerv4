@@ -145,6 +145,7 @@
         }
         .badge-bp { background: #e3f2fd; color: #1565c0; }
         .badge-3v3 { background: #f3e5f5; color: #7b1fa2; }
+        .badge-wsdc { background: #e8f5e9; color: #2e7d32; }
         .collapsible {
             cursor: pointer;
             padding: 10px;
@@ -204,12 +205,13 @@
             <label>Debate Format <span class="format-badge badge-bp" id="format-badge">BP = 2 speakers/team</span></label>
             <select name="debate_format" id="debate_format" onchange="updateFormatBadge()">
                 <option value="bp">British Parliamentary (BP) — 2 speakers per team</option>
-                <option value="3v3">3v3 Formats (Australs, WSDC, UADC, etc.) — 3 speakers per team</option>
+                <option value="3v3">3v3 Formats (Australs, UADC, etc.) — 3 speakers per team</option>
+                <option value="wsdc">World Schools (WSDC) — 3 to 5 speakers per team</option>
             </select>
             <p class="hint">
                 This controls how many speakers are attached to each team during API import.
-                BP tournaments will only import the first 2 speakers per team.
-                3v3 tournaments will import all speakers (up to 3).
+                BP imports the first 2 speakers per team, 3v3 imports up to 3,
+                and WSDC imports up to 5 (warns if a team has fewer than 3).
             </p>
         </div>
 
@@ -309,6 +311,9 @@
             if (fmt === 'bp') {
                 badge.textContent = 'BP = 2 speakers/team';
                 badge.className = 'format-badge badge-bp';
+            } else if (fmt === 'wsdc') {
+                badge.textContent = 'WSDC = 3–5 speakers/team';
+                badge.className = 'format-badge badge-wsdc';
             } else {
                 badge.textContent = '3v3 = 3 speakers/team';
                 badge.className = 'format-badge badge-3v3';
