@@ -1,6 +1,7 @@
 """
 Tabbycat API Importer v3.6 — FIXED: Speaker team URLs, category support,
 independent teams, and institution regions
++ WSDC support (3-5 speakers per team)
 """
 
 import os
@@ -16,6 +17,11 @@ from flask import Flask, render_template, request, send_file, flash, redirect, u
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'tabbycat-importer-key-2024')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+
+# Max / min speakers imported per team, by debate format
+FORMAT_MAX_SPEAKERS = {'bp': 2, '3v3': 3, 'wsdc': 5}
+FORMAT_MIN_SPEAKERS = {'wsdc': 3}
+FORMAT_LABELS = {'bp': 'BP', '3v3': '3v3', 'wsdc': 'WSDC'}
 
 
 def clean_string(val):
@@ -455,7 +461,7 @@ def process_teams(rows):
     return results, errors
 
 
-def process_speakers(rows, max_speakers=None):
+def process_speakers(rows, max_speakers=None, debate_format=None):
     results = []
     errors = []
     for idx, row in enumerate(rows, start=2):
@@ -482,6 +488,7 @@ def process_speakers(rows, max_speakers=None):
         })
 
     if max_speakers and max_speakers > 0:
+        label = FORMAT_LABELS.get(debate_format, 'selected')
         team_counts = {}
         filtered = []
         for spk in results:
@@ -490,8 +497,15 @@ def process_speakers(rows, max_speakers=None):
             if team_counts[team] <= max_speakers:
                 filtered.append(spk)
             elif team_counts[team] == max_speakers + 1:
-                errors.append(f"Team '{team}': Only first {max_speakers} speakers imported (BP format). Skipped extra speakers.")
+                errors.append(f"Team '{team}': Only first {max_speakers} speakers imported ({label} format). Skipped extra speakers.")
         results = filtered
+
+        # Warn (does not block) when a team has fewer speakers than the format expects
+        min_speakers = FORMAT_MIN_SPEAKERS.get(debate_format)
+        if min_speakers:
+            for team, n in team_counts.items():
+                if team and n < min_speakers:
+                    errors.append(f"Team '{team}': only {n} speaker(s) found; {label} expects at least {min_speakers}.")
 
     return results, errors
 
@@ -626,7 +640,7 @@ def api_diagnose():
 def upload():
     mode = request.form.get('mode', 'csv')
     debate_format = request.form.get('debate_format', 'bp')
-    max_speakers = 2 if debate_format == 'bp' else 3
+    max_speakers = FORMAT_MAX_SPEAKERS.get(debate_format, 3)
 
     try:
         if 'institutions' not in request.files:
@@ -667,7 +681,7 @@ def upload():
 
         if speakers_file and speakers_file.filename:
             speaker_rows = read_uploaded_file(speakers_file)
-            speakers, speaker_errors = process_speakers(speaker_rows, max_speakers=max_speakers)
+            speakers, speaker_errors = process_speakers(speaker_rows, max_speakers=max_speakers, debate_format=debate_format)
 
         api_results = None
         if mode == 'api':
