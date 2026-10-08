@@ -125,6 +125,9 @@
             background: #fff3cd; color: #856404; border: 1px solid #ffeaa7;
             padding: 14px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 14px;
         }
+        .map-table td:first-child { width: 38%; font-weight: 600; }
+        .warn-list { background: #fff3cd; color: #856404; padding: 12px 12px 12px 30px; border-radius: 6px; font-size: 13px; max-height: 260px; overflow-y: auto; }
+        .warn-list li { margin: 4px 0; }
         details { margin: 8px 0; font-size: 13px; }
         details summary { cursor: pointer; font-weight: 600; }
         details ul { margin: 6px 0 0; padding-left: 22px; max-height: 220px; overflow-y: auto; }
@@ -138,6 +141,50 @@
         <strong>Preview only &mdash; nothing was imported.</strong>
         The report below shows what <em>would</em> be created and what already exists on your tab site.
         Go back, untick &ldquo;Preview only&rdquo; and submit again to import the new entries.
+    </div>
+    {% endif %}
+
+    {% if combined %}
+    <div class="card">
+        <h2>Combined Teams + Speakers File</h2>
+        <div class="stats">
+            <div class="stat-box"><div class="stat-number">{{ combined.stats.rows_total }}</div><div class="stat-label">Rows in file</div></div>
+            <div class="stat-box"><div class="stat-number">{{ combined.stats.teams }}</div><div class="stat-label">Teams read</div></div>
+            <div class="stat-box"><div class="stat-number">{{ combined.stats.speakers }}</div><div class="stat-label">Speakers read</div></div>
+            <div class="stat-box"><div class="stat-number">{{ combined.stats.skipped.values()|sum }}</div><div class="stat-label">Rows skipped</div></div>
+        </div>
+        {% if combined.stats.skipped %}
+        <p style="font-size:13px;color:#666;">Skipped:
+            {% for reason, n in combined.stats.skipped.items() %}<strong>{{ n }}</strong> {{ reason }}{% if not loop.last %}; {% endif %}{% endfor %}
+        </p>
+        {% endif %}
+
+        {% if combined.warnings %}
+        <details open><summary>Things to check ({{ combined.warnings|length }})</summary>
+            <ul class="warn-list">{% for w in combined.warnings[:150] %}<li>{{ w }}</li>{% endfor %}
+            {% if combined.warnings|length > 150 %}<li>... and {{ combined.warnings|length - 150 }} more</li>{% endif %}</ul>
+        </details>
+        {% endif %}
+
+        <details><summary>How your columns were understood ({{ combined.mapping_rows|length }} columns used)</summary>
+            <table class="map-table">
+                <tr><th>Meaning</th><th>Column(s) in your file</th></tr>
+                {% for label, cols in combined.mapping_rows %}<tr><td>{{ label }}</td><td>{{ cols }}</td></tr>{% endfor %}
+            </table>
+            {% if combined.ignored_columns %}
+            <p style="font-size:12px;color:#666;margin-top:10px;"><strong>Not used:</strong> {{ combined.ignored_columns|join(' | ') }}</p>
+            {% endif %}
+        </details>
+        <p style="font-size:12px;color:#666;">Wrong column picked up? Rename the header in your sheet (for example to
+            <code>speaker_1_email</code>) and run it again, or download the cleaned standard file below to check it.</p>
+        <a href="/download/{{ download_id }}/teams_speakers" class="btn btn-outline">&#11015; Cleaned combined file (standard layout)</a>
+    </div>
+    {% endif %}
+
+    {% if report and report.notes %}
+    <div class="card">
+        <h2>Notes</h2>
+        <ul class="warn-list">{% for n in report.notes %}<li>{{ n }}</li>{% endfor %}</ul>
     </div>
     {% endif %}
 
