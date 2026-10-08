@@ -38,6 +38,30 @@ In **Direct API Import** mode the importer first reads what is already on the ta
 - If the existing entries cannot be read (for example the token has no admin access), nothing is imported.
 - The results page lists what was new, what already existed, and what failed (with the reason).
 
+
+## Teams + Speakers in one file (v5.0)
+
+Upload **one row per team with its speakers side by side** instead of separate Teams and Speakers files.
+Use it alone or together with the separate files; everything is imported through the same batch-aware logic
+(existing entries are skipped, only new ones are imported).
+
+- **Standard layout** (download the template from the importer): `institution, reference, short_reference, code_name,
+  use_institution_prefix, emoji, team_name (human)`, then `speaker_N_name, speaker_N_gender, speaker_N_email,
+  speaker_N_phone, speaker_N_anonymous, speaker_N_categories` for N = 1..5.
+- **Google Form / registration sheets** are read as they are: headers such as `Name of Speaker 1`,
+  `Email Address of Speaker 1`, `Phone Number (WhatsApp) of Speaker 1`, `Gender of Speaker 1`,
+  `Does Speaker 1 qualify as Novice?`, `Team Name`, `Full Name of Institution`, `Abbreviation for Institution`,
+  `Institution of Speaker 1` are detected automatically. The results page shows how every column was understood.
+- **Blank speaker columns are fine**: a WSDC team with only speakers 1-3 filled in is read as a 3-speaker team.
+  Format limits still apply (BP 2, 3v3 3, WSDC 5; WSDC warns below 3).
+- Rows that are not teams (e.g. adjudicator registrations) are skipped and counted.
+- Institutions: `Full Name` + `Abbreviation` columns create institutions (matched to existing ones by name/code, ignoring
+  case and punctuation). A team whose speakers all share one institution gets that institution; mixed institutions
+  become an independent (composite) team. Options decide what happens to an institution that is in none of your files.
+- Gender answers such as `Cis Male / Cis Female / Non-Binary / Agender / Prefer Not Say` become M / F / O / blank;
+  `Novice? Yes` can become the speaker category `Novice`; invalid emails are dropped with a warning (the speaker is still imported).
+- Needs `openpyxl` in `requirements.txt` to read `.xlsx` files.
+
 ## API Requirements
 
 - Tabbycat URL
