@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tabbycat Importer v4.0</title>
+    <title>Tabbycat Importer v5.0</title>
     <style>
         * { box-sizing: border-box; }
         body {
@@ -171,6 +171,13 @@
         }
         .batch-check { display: flex; gap: 8px; align-items: flex-start; font-weight: normal; margin-top: 15px; cursor: pointer; }
         .batch-check input { margin-top: 5px; }
+        .file-section.combined { border-left-color: #28a745; background: #f4fbf6; }
+        .opt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; margin-top: 10px; }
+        @media (max-width: 600px) { .opt-grid { grid-template-columns: 1fr; } }
+        .opt-grid label { margin: 6px 0 4px; font-size: 13px; }
+        .opt-grid select { padding: 8px 10px; font-size: 13px; }
+        .col-example { font-size: 12px; background: #fff; border: 1px solid #d5e8da; border-radius: 6px; padding: 8px 10px; margin-top: 8px; }
+        .col-example code { font-size: 11px; }
         .two-col {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -182,7 +189,7 @@
     </style>
 </head>
 <body>
-    <h1>Tabbycat Importer <span style="font-size:14px;color:#888;">v4.0</span></h1>
+    <h1>Tabbycat Importer <span style="font-size:14px;color:#888;">v5.0</span></h1>
     <p class="subtitle">Import institutions, teams, speakers, and adjudicators into Tabbycat &mdash; in as many batches as you need</p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -301,14 +308,59 @@
                 <input type="file" name="adjudicators" accept=".csv,.xlsx,.xls">
             </div>
 
+            <div class="file-section combined">
+                <h3>👥🎤 Teams + Speakers in ONE file (optional)</h3>
+                <p class="hint">
+                    One row per team, with its speakers side by side. You do <strong>not</strong> need the separate Teams and
+                    Speakers files for these teams, and you can paste a <strong>Google Form responses sheet</strong> as it is:
+                    columns such as <code>Name of Speaker 1</code>, <code>Email Address of Speaker 1</code>,
+                    <code>Gender of Speaker 1</code>, <code>Team Name</code>, <code>Full Name of Institution</code> are recognised automatically.
+                    Rows that are not teams (e.g. adjudicator registrations) are skipped.
+                </p>
+                <details class="col-example">
+                    <summary><strong>Standard layout</strong> (what the template contains)</summary>
+                    <p class="hint" style="margin:6px 0;">
+                        Team columns: <code>institution, reference, short_reference, code_name, use_institution_prefix, emoji, team_name (human)</code><br>
+                        then for each speaker N (1 to 5): <code>speaker_N_name, speaker_N_gender, speaker_N_email, speaker_N_phone, speaker_N_anonymous, speaker_N_categories</code><br>
+                        Leave the unused speaker columns blank: a WSDC team with only speakers 1&ndash;3 filled in is read as a 3-speaker team (no error).
+                    </p>
+                    <a href="/template/teams-speakers">&#11015; Download the template (.csv)</a>
+                </details>
+                <input type="file" name="teams_speakers" accept=".csv,.xlsx,.xls" style="margin-top:8px;">
+
+                <div class="opt-grid">
+                    <div>
+                        <label for="institution_policy">If a team's institution is not in your files</label>
+                        <select name="institution_policy" id="institution_policy">
+                            <option value="create" selected>Create the institution automatically</option>
+                            <option value="independent">Import the team as independent (no institution)</option>
+                            <option value="skip">Skip the team and report it</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="team_prefix">Team names</label>
+                        <select name="team_prefix" id="team_prefix">
+                            <option value="auto" selected>Automatic (use the file's column, else no prefix)</option>
+                            <option value="always">Always prefix with the institution code</option>
+                            <option value="never">Never prefix (team name as typed)</option>
+                        </select>
+                    </div>
+                </div>
+                <label class="batch-check">
+                    <input type="checkbox" name="novice_category" checked>
+                    <span>Turn <em>"Does Speaker N qualify as Novice? &mdash; Yes"</em> answers into the speaker category <strong>Novice</strong></span>
+                </label>
+                <p class="hint">Tip: tick <strong>Preview only</strong> first. The results page shows how every column was understood and what would be created.</p>
+            </div>
+
             <div class="file-section">
-                <h3>👥 Teams</h3>
+                <h3>👥 Teams (separate file)</h3>
                 <p class="hint">Columns: <code>institution, reference, short_reference, use_institution_prefix, emoji, code_name, team_name (human)</code></p>
                 <input type="file" name="teams" accept=".csv,.xlsx,.xls">
             </div>
 
             <div class="file-section">
-                <h3>🎤 Speakers</h3>
+                <h3>🎤 Speakers (separate file)</h3>
                 <p class="hint">Columns: <code>name, gender, email, phone, anonymous, team, categories, initials_match</code></p>
                 <p class="hint">The <code>team</code> column must match the <code>team_name (human)</code> column in the Teams file.</p>
                 <input type="file" name="speakers" accept=".csv,.xlsx,.xls">
