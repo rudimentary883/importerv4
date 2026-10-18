@@ -215,6 +215,7 @@ _TEAM_PATTERNS = [
     ('reference', r'(team )?reference'),
     ('team_name', r'(name of )?team( name)?( \d+)?'),
     ('emoji', r'emoji'),
+    ('break_categories', r'break( eligibility| categories| category| cats?)?|eligibility|eligible categories|eligible for break'),
     ('institution_code', r'(institution |inst |university |college |school )?(abbreviation|abbrev|acronym|code)'
                          r'( for (the )?(institution|university|college|school))?'),
     ('institution', r'(full name of )?(the )?(institution|university|college|school|affiliation)( name)?'),
@@ -230,6 +231,7 @@ FIELD_LABELS = OrderedDict([
     ('code_name', 'Team code name'),
     ('use_prefix', 'Use institution prefix'),
     ('emoji', 'Emoji'),
+    ('break_categories', 'Break categories'),
     ('registration_type', 'Registration type (used to skip adjudicator rows)'),
 ])
 SPEAKER_LABELS = OrderedDict([
@@ -428,6 +430,7 @@ def parse_combined(rows, options=None, known_institutions=(), max_speakers=3,
                        'short_ref': _first(row, tm.get('short_reference')),
                        'code_name': _first(row, tm.get('code_name')),
                        'emoji': _first(row, tm.get('emoji')),
+                       'break_cats': _first(row, tm.get('break_categories')),
                        'prefix_cell': _first(row, tm.get('use_prefix'))})
 
     # ---------------- institutions that the file itself defines (name + abbreviation) -----------
@@ -521,7 +524,9 @@ def parse_combined(rows, options=None, known_institutions=(), max_speakers=3,
         short_ref = (p['short_ref'] or reference)[:35].strip()
         team = {'institution': inst_code, 'reference': reference, 'short_reference': short_ref,
                 'code_name': p['code_name'], 'use_institution_prefix': bool(use_prefix),
-                'emoji': p['emoji'], 'team_name_human': display, 'inst_soft': soft}
+                'emoji': p['emoji'], 'team_name_human': display, 'inst_soft': soft,
+                'break_categories': '; '.join(dict.fromkeys(
+                    c.strip() for c in re.split(r'[;,|\n]+', p['break_cats']) if c.strip()))}
         if soft:
             unresolved_notes[clean_text(inst_code)] += 1
 
@@ -591,7 +596,7 @@ def parse_combined(rows, options=None, known_institutions=(), max_speakers=3,
 # ----------------------------------------------------------------------------
 
 TEAM_COLUMNS = ['institution', 'reference', 'short_reference', 'code_name',
-                'use_institution_prefix', 'emoji', 'team_name (human)']
+                'use_institution_prefix', 'emoji', 'team_name (human)', 'break_categories']
 SPEAKER_FIELDS = ['name', 'gender', 'email', 'phone', 'anonymous', 'categories']
 
 
@@ -608,7 +613,8 @@ def standard_csv(team_speaker_pairs, slots=MAX_SPEAKER_SLOTS):
     w.writerow(standard_headers(slots))
     for team, spks in team_speaker_pairs:
         row = [team['institution'], team['reference'], team['short_reference'], team['code_name'],
-               'TRUE' if team['use_institution_prefix'] else 'FALSE', team['emoji'], team['team_name_human']]
+               'TRUE' if team['use_institution_prefix'] else 'FALSE', team['emoji'], team['team_name_human'],
+               team.get('break_categories', '')]
         for n in range(slots):
             if n < len(spks):
                 s = spks[n]
@@ -629,12 +635,12 @@ def template_csv():
     def spk(name, gender='', email='', phone='', anon='FALSE', cats=''):
         return [name, gender, email, phone, anon, cats]
     blank = [''] * len(SPEAKER_FIELDS)
-    w.writerow(['Andhra', 'A', 'A', 'Talreja & Aditya', 'TRUE', '', 'Andhra A']
+    w.writerow(['Andhra', 'A', 'A', 'Talreja & Aditya', 'TRUE', '', 'Andhra A', 'Open; Union Cup']
                + spk('First Speaker', 'F', 'first@example.com', '+91 9000000001') + spk('Second Speaker', 'M')
                + blank * 3)
-    w.writerow(['COEP', 'B', 'B', '', 'TRUE', '', 'COEP B']
+    w.writerow(['COEP', 'B', 'B', '', 'TRUE', '', 'COEP B', 'Open']
                + spk('Third Speaker', 'M', cats='Novice') + spk('Fourth Speaker', 'F') + spk('Fifth Speaker')
                + blank * 2)
-    w.writerow(['', 'Free Agents', 'Free Agents', '', 'FALSE', '', 'Free Agents']
+    w.writerow(['', 'Free Agents', 'Free Agents', '', 'FALSE', '', 'Free Agents', '']
                + spk('Speaker A') + spk('Speaker B') + spk('Speaker C') + spk('Speaker D') + spk('Speaker E'))
     return out.getvalue()
