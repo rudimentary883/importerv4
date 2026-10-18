@@ -1348,11 +1348,6 @@ def download(download_id, file_type):
 from conflicts import register_conflicts
 register_conflicts(app, TabbycatAPI, url_id, build_institution_index, find_existing_institution)
 
-# Judges who judged N+ preliminary rounds -> .csv (page /judge-rounds)
-from judge_rounds import register_judge_rounds
-register_judge_rounds(app)
-
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
