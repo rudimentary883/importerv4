@@ -409,7 +409,7 @@ class TabbycatAPI:
         return None
 
     def create_team(self, institution_url, reference, short_reference,
-                    use_institution_prefix=True, emoji='', speakers=None, code_name=''):
+                    use_institution_prefix=True, emoji='', speakers=None, code_name='', break_categories=None):
         data = {
             "reference": reference,
             "short_reference": short_reference or reference,
@@ -421,6 +421,8 @@ class TabbycatAPI:
             data["emoji"] = emoji
         if code_name:
             data["code_name"] = code_name
+        if break_categories:
+            data["break_categories"] = list(break_categories)
         if speakers:
             data["speakers"] = speakers
 
@@ -573,7 +575,9 @@ def process_teams(rows):
             'code_name': clean_string(row.get('code_name', '')),
             'use_institution_prefix': parse_bool(row.get('use_institution_prefix', True)),
             'emoji': clean_string(row.get('emoji', '')),
-            'team_name_human': clean_string(row.get('team_name (human)', ''))
+            'team_name_human': clean_string(row.get('team_name (human)', '')),
+            'break_categories': clean_string(row.get('break_categories', '') or row.get('break categories', '')
+                                             or row.get('break_category', ''))
         })
     return results, errors
 
@@ -658,12 +662,12 @@ def generate_adjudicators_csv(adjudicators):
 def generate_teams_csv(teams):
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(['institution', 'reference', 'short_reference', 'use_institution_prefix', 'emoji'])
+    writer.writerow(['institution', 'reference', 'short_reference', 'use_institution_prefix', 'emoji', 'break_categories'])
     for team in teams:
         writer.writerow([
             team['institution'], team['reference'], team['short_reference'],
             'TRUE' if team['use_institution_prefix'] else 'FALSE',
-            team['emoji']
+            team['emoji'], team.get('break_categories', '')
         ])
     return output.getvalue()
 
@@ -684,6 +688,11 @@ def generate_speakers_csv(speakers):
 # =============================================================================
 # BATCH-AWARE IMPORT (v4.0)
 # =============================================================================
+
+def split_break_categories(text):
+    """'Open; Union Cup' / 'Open, ESL' / 'Open|EFL' -> ['Open', 'Union Cup']."""
+    return [p.strip() for p in re.split(r'[;,|\n]+', str(text or '')) if p.strip()]
+
 
 class ImportAbort(Exception):
     pass
@@ -858,6 +867,33 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
         if t_url and sp.get('name'):
             speaker_names.setdefault(t_url, set()).add(norm(sp['name']))
 
+    # ------------------------------------------------------------------ break categories (optional column 'break_categories')
+    bc_map, bc_missing, bc_unconfirmed, bc_read = {}, {}, [], False
+    if any(split_break_categories(t.get('break_categories')) for t in teams):
+        bc_items, bc_err = api._get_list(api._tournament_url('/break-categories'))
+        if bc_items is None:
+            report['notes'].append(f"Break categories could not be read ({bc_err}): the teams are imported WITHOUT break categories.")
+        else:
+            bc_read = True
+            for c in bc_items:
+                if isinstance(c, dict):
+                    c_url = (c.get('url') or '').rstrip('/') or (
+                        f"{api.base_url}/api/v1/tournaments/{api.slug}/break-categories/{c['id']}" if c.get('id') is not None else '')
+                    for key in (c.get('name'), c.get('slug')):
+                        if norm(key) and c_url:
+                            bc_map[norm(key)] = c_url
+
+    def team_break_urls(team):
+        urls = []
+        for name in split_break_categories(team.get('break_categories')):
+            u = bc_map.get(norm(name))
+            if u:
+                if u not in urls:
+                    urls.append(u)
+            elif bc_read:
+                bc_missing[name] = bc_missing.get(name, 0) + 1
+        return urls
+
     renames, matched = {}, []      # sync: renamed teams {key: site url} ; (team, site url, renamed) for teams in the file AND on the tab
     if syncer:
         renames = syncer.detect_renames(teams, speakers, team_index, resolve_institution)
@@ -886,6 +922,7 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
         names_for_team = {norm(default_name)}
         if team['team_name_human']:
             names_for_team.add(norm(team['team_name_human']))
+        bc_urls = team_break_urls(team)
 
         if site_url:
             for n in names_for_team:
@@ -911,8 +948,13 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
             use_institution_prefix=team['use_institution_prefix'],
             emoji=team['emoji'],
             code_name=team['code_name'],
-            speakers=None)
+            speakers=None,
+            break_categories=bc_urls)
         if result and 'id' in result:
+            if bc_urls:
+                got = [(x.get('url') if isinstance(x, dict) else x) for x in (result.get('break_categories') or [])]
+                if not set(str(g).rstrip('/') for g in got) >= set(bc_urls):
+                    bc_unconfirmed.append(label)
             t_url = (result.get('url') or '').rstrip('/') or f"{api.base_url}/api/v1/tournaments/{api.slug}/teams/{result['id']}"
             team_index[key] = t_url
             speaker_names.setdefault(t_url, set())
@@ -922,6 +964,15 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
             new_rows['teams'].append(team)
         else:
             report['teams']['failed'].append((label, failure_reason(before)))
+
+    for name, n in bc_missing.items():
+        report['notes'].append(
+            f"Break category '{name}' ({n} team(s) in your file) does not exist on the tab. Create it first "
+            f"(Setup > Edit Break Categories), then run again with 'Update teams and speakers already on the tab' ticked.")
+    if bc_unconfirmed:
+        report['notes'].append(
+            f"The tab did not confirm the break categories of {len(bc_unconfirmed)} new team(s) "
+            f"(e.g. {bc_unconfirmed[0]}). Open Breaks > Edit Eligibility to check them.")
 
     # ------------------------------------------------------------------ speaker categories
     category_map = {}
@@ -952,7 +1003,7 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
     if syncer:
         syncer.sync_existing(matched, speakers,
                              lambda name: team_alias_csv.get(norm(name)) or team_alias_site.get(norm(name)),
-                             category_map, speaker_names)
+                             category_map, speaker_names, bc_map)
 
     # ------------------------------------------------------------------ speakers
     for spk in speakers:
@@ -1291,6 +1342,15 @@ def download(download_id, file_type):
         return redirect(url_for('index'))
     buffer = io.BytesIO(bundle[file_type].encode('utf-8'))
     return send_file(buffer, mimetype='text/csv', as_attachment=True, download_name=f'{file_type}.csv')
+
+
+# Conflicts importer page (/conflicts) - separate module, nothing above is touched by it
+from conflicts import register_conflicts
+register_conflicts(app, TabbycatAPI, url_id, build_institution_index, find_existing_institution)
+
+# Judges who judged N+ preliminary rounds -> .csv (page /judge-rounds)
+from judge_rounds import register_judge_rounds
+register_judge_rounds(app)
 
 
 if __name__ == '__main__':
