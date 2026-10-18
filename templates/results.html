@@ -233,6 +233,33 @@
     </div>
     {% endif %}
 
+    {% if report and report.sync %}
+    <div class="card">
+        <h2>Sync with your file {% if dry_run %}(preview){% endif %}</h2>
+        {% set sy = report.sync %}
+        {% if not (sy.teams_updated or sy.speakers_updated or sy.removed or sy.left_alone or sy.failed) %}
+            <p>Everything already matches your file.</p>
+        {% endif %}
+        {% for key, label in [('teams_updated','Teams updated / renamed'),('speakers_updated','Speakers updated / renamed'),('removed','Teams deleted')] %}
+            {% if sy[key] %}
+            <details open><summary>{{ label }}{% if dry_run %} &mdash; would be done{% endif %} ({{ sy[key]|length }})</summary>
+                <ul>{% for item in sy[key][:200] %}<li>{{ item }}</li>{% endfor %}</ul>
+            </details>
+            {% endif %}
+        {% endfor %}
+        {% if sy.left_alone %}
+        <details open><summary>Left alone ({{ sy.left_alone|length }})</summary>
+            <ul>{% for item in sy.left_alone[:200] %}<li>{{ item }}</li>{% endfor %}</ul>
+        </details>
+        {% endif %}
+        {% if sy.failed %}
+        <details open><summary style="color:#721c24;">Sync failed ({{ sy.failed|length }})</summary>
+            <ul>{% for item, reason in sy.failed[:100] %}<li>{{ item }} &mdash; <em>{{ reason }}</em></li>{% endfor %}</ul>
+        </details>
+        {% endif %}
+    </div>
+    {% endif %}
+
     {% if mode == 'api' and not dry_run %}
     <div class="card">
         <h2>API Request Summary</h2>
