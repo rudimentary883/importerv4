@@ -353,6 +353,25 @@
                 <p class="hint">Tip: tick <strong>Preview only</strong> first. The results page shows how every column was understood and what would be created.</p>
             </div>
 
+            <div class="file-section" style="border-left-color:#e0a800;">
+                <h3>🔄 Keep teams already on the tab in sync with the file (optional, Direct API Import only)</h3>
+                <p class="hint">Use this when you upload an <strong>updated</strong> version of a teams file that was imported before.
+                Tick <strong>Preview only</strong> first and read the "Sync" part of the results.</p>
+                <label class="batch-check">
+                    <input type="checkbox" name="sync_update">
+                    <span><strong>Update teams and speakers that are already on the tab</strong> &mdash; fills in emojis and code names,
+                    renames a team that has the same speakers under a new name, renames a speaker whose lineup changed
+                    (the existing speaker record is changed, not deleted), and adds email / gender / categories that are
+                    missing. Nothing is deleted.</span>
+                </label>
+                <label class="batch-check">
+                    <input type="checkbox" name="sync_delete">
+                    <span><strong>Also delete teams that are not in the file</strong> &mdash; <strong style="color:#c0392b;">cannot be undone</strong>.
+                    Ticking this also turns on the update above. Nothing is deleted if some rows of the file failed, or if the file
+                    would remove more than half of the teams (it looks like a partial file). Do not use once a draw has been made.</span>
+                </label>
+            </div>
+
             <div class="file-section">
                 <h3>👥 Teams (separate file)</h3>
                 <p class="hint">Columns: <code>institution, reference, short_reference, use_institution_prefix, emoji, code_name, team_name (human)</code></p>
