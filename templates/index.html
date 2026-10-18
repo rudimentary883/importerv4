@@ -190,7 +190,8 @@
 </head>
 <body>
     <h1>Tabbycat Importer <span style="font-size:14px;color:#888;">v5.0</span></h1>
-    <p class="subtitle">Import institutions, teams, speakers, and adjudicators into Tabbycat &mdash; in as many batches as you need</p>
+    <p class="subtitle">Import institutions, teams, speakers, and adjudicators into Tabbycat &mdash; in as many batches as you need
+        &middot; <a href="/conflicts">Import conflicts &rarr;</a></p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
@@ -320,7 +321,8 @@
                 <details class="col-example">
                     <summary><strong>Standard layout</strong> (what the template contains)</summary>
                     <p class="hint" style="margin:6px 0;">
-                        Team columns: <code>institution, reference, short_reference, code_name, use_institution_prefix, emoji, team_name (human)</code><br>
+                        Team columns: <code>institution, reference, short_reference, code_name, use_institution_prefix, emoji, team_name (human), break_categories</code><br>
+                        <code>break_categories</code> is optional: names of <strong>break categories that already exist on the tab</strong>, separated by <code>;</code> (e.g. <code>Open; Union Cup</code>). Blank = nothing is set.<br>
                         then for each speaker N (1 to 5): <code>speaker_N_name, speaker_N_gender, speaker_N_email, speaker_N_phone, speaker_N_anonymous, speaker_N_categories</code><br>
                         Leave the unused speaker columns blank: a WSDC team with only speakers 1&ndash;3 filled in is read as a 3-speaker team (no error).
                     </p>
@@ -374,7 +376,8 @@
 
             <div class="file-section">
                 <h3>👥 Teams (separate file)</h3>
-                <p class="hint">Columns: <code>institution, reference, short_reference, use_institution_prefix, emoji, code_name, team_name (human)</code></p>
+                <p class="hint">Columns: <code>institution, reference, short_reference, use_institution_prefix, emoji, code_name, team_name (human)</code>
+                and optionally <code>break_categories</code> (existing break categories, separated by <code>;</code>, e.g. <code>Open; Union Cup</code>)</p>
                 <input type="file" name="teams" accept=".csv,.xlsx,.xls">
             </div>
 
