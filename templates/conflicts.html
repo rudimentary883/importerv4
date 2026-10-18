@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tabbycat Conflicts Importer</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 900px;
+               margin: 0 auto; padding: 20px; background: #f5f5f5; line-height: 1.6; }
+        h1 { color: #333; margin-bottom: 5px; }
+        .subtitle { color: #666; font-size: 14px; margin-bottom: 25px; }
+        .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .card h2 { margin-top: 0; font-size: 18px; color: #444; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; }
+        label { display: block; font-weight: 600; margin: 15px 0 5px; color: #444; }
+        input[type="text"], input[type="password"], input[type="url"], select { width: 100%; padding: 10px 12px;
+               border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+        input[type="file"] { padding: 8px 0; }
+        .hint { font-size: 12px; color: #888; margin-top: 3px; }
+        .btn { background: #28a745; color: white; border: none; padding: 14px 32px; border-radius: 6px; font-size: 16px; cursor: pointer; font-weight: 600; }
+        .btn:hover { background: #218838; }
+        .flash { padding: 12px 16px; border-radius: 6px; margin-bottom: 20px; }
+        .flash.error { background: #f8d7da; color: #721c24; }
+        .flash.warn { background: #fff3cd; color: #856404; margin: 8px 0; }
+        .batch-info { background: #eaf2fb; border-left: 4px solid #4a90d9; padding: 12px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 10px; }
+        .batch-check { display: flex; gap: 8px; align-items: flex-start; font-weight: normal; margin-top: 15px; cursor: pointer; }
+        .batch-check input { margin-top: 5px; }
+        .file-section { margin: 15px 0; padding: 15px; background: #fafafa; border-radius: 6px; border-left: 4px solid #4a90d9; }
+        .file-section.combined { border-left-color: #28a745; background: #f4fbf6; }
+        .file-section h3 { margin: 0 0 8px; font-size: 15px; }
+        .opt-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px 18px; margin-top: 10px; }
+        @media (max-width: 600px) { .opt-grid { grid-template-columns: 1fr; } }
+        .opt-grid label { margin: 6px 0 4px; font-size: 13px; }
+        .opt-grid input, .opt-grid select { padding: 8px 10px; font-size: 13px; }
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+        @media (max-width: 600px) { .two-col { grid-template-columns: 1fr; } }
+        .ok { color: #1b7f3b; } .skip { color: #666; } .bad { color: #c0392b; }
+        ul.res { padding-left: 18px; margin: 6px 0; font-size: 13px; } ul.res li { margin: 3px 0; word-break: break-word; }
+        details { margin: 8px 0; } summary { cursor: pointer; font-weight: 600; }
+        a { color: #357abd; }
+    </style>
+</head>
+<body>
+    <h1>Tabbycat Conflicts Importer</h1>
+    <p class="subtitle">Import judge&ndash;judge, judge&ndash;team (or speaker) and judge&ndash;institution conflicts &middot;
+        <a href="/">&larr; back to the teams / judges importer</a></p>
+
+    {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+    {% if results %}
+    <div class="card">
+        <h2>{% if dry_run %}Preview &mdash; nothing was imported{% else %}Results{% endif %}</h2>
+        {% for r in results %}
+            <h3>{{ r.title }}</h3>
+            <p>{{ r.rows }} rows read{% if r.skipped %} (+ {{ r.skipped }} skipped by status){% endif %} &middot;
+                <span class="ok">{{ r.created|length }} {% if dry_run %}would be added{% else %}added{% endif %}</span> &middot;
+                <span class="skip">{{ r.existing|length }} already existed</span> &middot;
+                <span class="bad">{{ r.failed|length }} need attention</span></p>
+            {% if r.failed %}
+            <details open><summary class="bad">Need attention (fix these in the sheet and upload again)</summary>
+                <ul class="res">{% for label, why, c1, c2 in r.failed %}<li>{{ label }} &mdash; {{ why }}</li>{% endfor %}</ul>
+                <p><a download="conflicts_to_fix.csv" href="data:text/csv;base64,{{ r.failed_csv }}">&#11015; Download these as a .csv</a></p>
+            </details>{% endif %}
+            {% if r.created %}<details><summary class="ok">{% if dry_run %}Would be added{% else %}Added{% endif %}</summary>
+                <ul class="res">{% for label in r.created %}<li>{{ label }}</li>{% endfor %}</ul></details>{% endif %}
+            {% if r.existing %}<details><summary class="skip">Already existed / duplicates</summary>
+                <ul class="res">{% for label in r.existing %}<li>{{ label }}</li>{% endfor %}</ul></details>{% endif %}
+        {% endfor %}
+        {% for n in notes %}<div class="flash warn">{{ n }}</div>{% endfor %}
+        <p class="hint">Finished in {{ stats.seconds }} s.</p>
+    </div>
+    {% endif %}
+
+    <form action="/conflicts" method="POST" enctype="multipart/form-data">
+        <div class="card">
+            <h2>1. Tabbycat API Settings</h2>
+            <div class="two-col">
+                <div>
+                    <label for="api_url">Tabbycat URL</label>
+                    <input type="url" name="api_url" id="api_url" value="{{ form.api_url }}" placeholder="https://yourtournament.calicotab.com">
+                </div>
+                <div>
+                    <label for="tournament_slug">Tournament Slug</label>
+                    <input type="text" name="tournament_slug" id="tournament_slug" value="{{ form.tournament_slug }}" placeholder="abp2026">
+                </div>
+            </div>
+            <label for="api_token">API Token</label>
+            <input type="text" name="api_token" id="api_token" autocomplete="off">
+            <p class="hint">Same token as the main importer (admin account).</p>
+            <details><summary>Session auth fallback (optional)</summary>
+                <div class="two-col">
+                    <div><label>Admin Username</label><input type="text" name="api_username" value="{{ form.api_username }}"></div>
+                    <div><label>Admin Password</label><input type="password" name="api_password" autocomplete="off"></div>
+                </div>
+            </details>
+            <label class="batch-check">
+                <input type="checkbox" name="dry_run" {% if dry_run %}checked{% endif %}>
+                <span><strong>Preview only</strong> &mdash; match everything and show what <em>would</em> be imported, but import nothing. Recommended for the first run.</span>
+            </label>
+        </div>
+
+        <div class="card">
+            <h2>2. Upload the conflicts file</h2>
+            <div class="batch-info">
+                One file (.csv or .xlsx) can feed several <strong>blocks</strong> &mdash; each block reads two columns.
+                Conflicts already on the tab site are <strong>skipped</strong>, so you can upload the same file again after cleaning it.
+                Rows whose status column says <em>Deleted</em> are ignored.
+            </div>
+            <div class="file-section combined">
+                <h3>&#128196; Conflict file (shared by all ticked blocks)</h3>
+                <input type="file" name="shared_file" accept=".csv,.xlsx,.xlsm">
+                <label>Statuses to skip (comma-separated)</label>
+                <input type="text" name="skip_status" value="{{ skip_status }}">
+                <p class="hint">Compared with each block's status column, ignoring case. Blank statuses are imported.</p>
+            </div>
+
+            {% for b in blocks %}
+            <div class="file-section">
+                <h3><label class="batch-check" style="margin:0;"><input type="checkbox" name="b{{ b.n }}_on" {% if b.on %}checked{% endif %}>
+                    <span>Block {{ b.n }}</span></label></h3>
+                <div class="opt-grid">
+                    <div>
+                        <label>What is in these columns?</label>
+                        <select name="b{{ b.n }}_type">
+                            {% for k, v in types.items() %}<option value="{{ k }}" {% if b.type == k %}selected{% endif %}>{{ v }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label>Two columns</label>
+                        <input type="text" name="b{{ b.n }}_cols" value="{{ b.cols }}" placeholder="A,B">
+                    </div>
+                    <div>
+                        <label>Status column (optional)</label>
+                        <input type="text" name="b{{ b.n }}_status" value="{{ b.status }}" placeholder="C">
+                    </div>
+                    <div>
+                        <label>Sheet name (optional)</label>
+                        <input type="text" name="b{{ b.n }}_sheet" value="{{ b.sheet }}" placeholder="first sheet">
+                    </div>
+                    <div style="grid-column: span 2;">
+                        <label>Own file for this block (optional)</label>
+                        <input type="file" name="b{{ b.n }}_file" accept=".csv,.xlsx,.xlsm">
+                    </div>
+                </div>
+                {% if b.n == 1 %}<p class="hint"><strong>Mixed</strong> works out for every row whether it is judge&ndash;judge, judge&ndash;team/speaker or
+                    judge&ndash;institution, and which column is the judge. The ABP tracker's team/judge table is columns A,B (status C).</p>{% endif %}
+                {% if b.n == 2 %}<p class="hint">The ABP tracker's judge/judge table is columns E,F (status G). On a plain two-column file this block simply finds nothing.</p>{% endif %}
+            </div>
+            {% endfor %}
+            <p class="hint">Names can be a judge (<i>Name</i> or <i>Name (CODE)</i>, a trailing "- Judge" is ignored), a team, a <strong>speaker's name</strong> (the speaker's team is looked up), or an institution (name or code).
+                <a href="/conflicts/sample.csv">sample .csv</a></p>
+        </div>
+
+        <div class="card" style="text-align:center;">
+            <button type="submit" class="btn">&#128640; Process &amp; Import Conflicts</button>
+        </div>
+    </form>
+</body>
+</html>
