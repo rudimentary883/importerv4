@@ -1,4 +1,6 @@
 """
+Tabbycat API Importer v5.1 - adds an OPT-IN sync step (sync_import.py): update teams / speakers that are already on the
+  tab (emoji, code name, renamed teams, changed speakers) and optionally delete teams that are not in the file.
 Tabbycat API Importer v5.0 - adds the combined "Teams + Speakers" file (one row = team + speakers laid out horizontally,
   standard layout OR Google-Form style headers) on top of the v4.0 batch-aware importer.
 Tabbycat API Importer v4.0 — batch-aware ("dynamic") importing
@@ -23,6 +25,7 @@ from collections import OrderedDict
 from flask import Flask, render_template, request, send_file, flash, redirect, url_for, jsonify
 
 from combined_import import parse_combined, inst_key, template_csv
+from sync_import import Sync
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'tabbycat-importer-key-2024')
@@ -735,7 +738,7 @@ def find_existing_institution(index, code, name=''):
     return None
 
 
-def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speakers, dry_run):
+def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speakers, dry_run, sync=None):
     """
     Compare the uploaded rows with what is already on the tab site and import only
     what is new. Returns (report, new_rows).
@@ -753,6 +756,11 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
         raise ImportAbort('Could not read the existing entries from the tab site (' + '; '.join(problems) +
                           '). Nothing was imported, to avoid creating duplicates. '
                           'Check the API token has admin access and try again.')
+
+    # opt-in sync (update existing teams / speakers, optionally delete teams missing from the file)
+    syncer = None
+    if sync and (sync.get('update') or sync.get('delete')):
+        syncer = Sync(api, existing, norm, url_id, dry_run, bool(sync.get('delete')), report)
 
     def failure_reason(errors_before):
         if len(api.stats['errors']) > errors_before:
@@ -850,6 +858,10 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
         if t_url and sp.get('name'):
             speaker_names.setdefault(t_url, set()).add(norm(sp['name']))
 
+    renames, matched = {}, []      # sync: renamed teams {key: site url} ; (team, site url, renamed) for teams in the file AND on the tab
+    if syncer:
+        renames = syncer.detect_renames(teams, speakers, team_index, resolve_institution)
+
     for team in teams:
         code = team['institution']
         inst_id, inst_url, status = resolve_institution(code)
@@ -868,6 +880,9 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
             continue
         key = (inst_id if status == 'ok' else None, norm(team['reference']))
         site_url = team_index.get(key)
+        renamed = False
+        if not site_url and key in renames:
+            site_url, renamed = renames[key], True
         names_for_team = {norm(default_name)}
         if team['team_name_human']:
             names_for_team.add(norm(team['team_name_human']))
@@ -875,6 +890,7 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
         if site_url:
             for n in names_for_team:
                 team_alias_csv[n] = site_url
+            matched.append((team, site_url, renamed))
             report['teams']['existing'].append(label)
             continue
 
@@ -931,6 +947,12 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
                     if not cat_url and 'id' in result:
                         cat_url = f"{api.base_url}/api/v1/tournaments/{api.slug}/speaker-categories/{result['id']}"
                     category_map[cat_name] = cat_url
+
+    # ------------------------------------------------------------------ sync existing teams / speakers (opt-in)
+    if syncer:
+        syncer.sync_existing(matched, speakers,
+                             lambda name: team_alias_csv.get(norm(name)) or team_alias_site.get(norm(name)),
+                             category_map, speaker_names)
 
     # ------------------------------------------------------------------ speakers
     for spk in speakers:
@@ -1013,6 +1035,9 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
             new_rows['adjudicators'].append(adj)
         else:
             report['adjudicators']['failed'].append((label, failure_reason(before)))
+
+    if syncer:
+        syncer.delete_missing({m[1] for m in matched}, bool(teams), len(report['teams']['failed']))
 
     return report, new_rows
 
@@ -1119,6 +1144,7 @@ def upload():
     debate_format = request.form.get('debate_format', 'bp')
     max_speakers = FORMAT_MAX_SPEAKERS.get(debate_format, 3)
     dry_run = request.form.get('dry_run') == 'on'
+    sync = {'update': request.form.get('sync_update') == 'on', 'delete': request.form.get('sync_delete') == 'on'}
 
     try:
         inst_rows = read_optional_upload('institutions')
@@ -1194,7 +1220,7 @@ def upload():
 
             try:
                 report, new_rows = run_batch_import(api, institutions, teams, adjudicators, speakers,
-                                                    max_speakers, dry_run)
+                                                    max_speakers, dry_run, sync=sync)
             except ImportAbort as e:
                 flash(str(e), 'error')
                 return redirect(url_for('index'))
