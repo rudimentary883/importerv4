@@ -105,6 +105,15 @@ def normalize_gender(value):
     return ''
 
 
+def _gender_is_category(value):
+    """Text in a gender column that is neither a gender nor a 'prefer not to say' answer, e.g. 'Union Cup'."""
+    t = norm(value)
+    if not t or normalize_gender(value):
+        return False
+    return not re.search(r'prefer not|rather not|not say|not specified|unspecified|^n/?a$|^none$|^nil$|^-+$|'
+                         r'trans|intersex|questioning|unknown|decline', t)
+
+
 EMAIL_RE = re.compile(r'^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$')
 
 _STOP_WORDS = {'of', 'the', 'for', 'and', 'in', 'at', 'de', 'la', 'a', 'an'}
@@ -448,6 +457,7 @@ def parse_combined(rows, options=None, known_institutions=(), max_speakers=3,
     seen_team_keys, used_displays = {}, set()
     cap = max_speakers if max_speakers and max_speakers > 0 else MAX_SPEAKER_SLOTS
     unresolved_notes = Counter()
+    gender_as_category = Counter()
 
     for p in parsed:
         # ---- the team's institution
@@ -537,6 +547,9 @@ def parse_combined(rows, options=None, known_institutions=(), max_speakers=3,
             cats = [c.strip() for c in re.split(r'[;,]', s['categories']) if c.strip()]
             if novice_cat and parse_yes(s['novice']) and 'novice' not in [c.lower() for c in cats]:
                 cats.append('Novice')
+            if _gender_is_category(s['gender']) and clean_text(s['gender']).lower() not in [c.lower() for c in cats]:
+                cats.append(clean_text(s['gender']))
+                gender_as_category[clean_text(s['gender'])] += 1
             team_speakers.append({
                 'name': s['name'], 'gender': normalize_gender(s['gender']), 'email': email,
                 'phone': s['phone'], 'anonymous': bool(parse_bool_or_none(s['anonymous'])),
@@ -554,6 +567,8 @@ def parse_combined(rows, options=None, known_institutions=(), max_speakers=3,
         clean_rows.append((team, team_speakers))
         stats['rows_used'] += 1
 
+    for text, n in gender_as_category.items():
+        warnings.append(f"'{text}' was found in a gender column ({n} speaker(s)); it was read as a speaker category.")
     for text, n in unresolved_notes.items():
         warnings.append(f"Institution '{text}' ({n} team(s)) is not in your files: it will be matched against the "
                         f"tab site and the team imported as independent if it is not there.")
