@@ -172,7 +172,7 @@ class Sync:
         return renames
 
     # ------------------------------------------------------------------ 2. update existing teams / speakers
-    def sync_existing(self, matched, speakers, team_url_of, category_map, speaker_names):
+    def sync_existing(self, matched, speakers, team_url_of, category_map, speaker_names, bc_map=None):
         cats = self._categories(category_map)
         per_team = {}
         for sp in speakers:
@@ -182,10 +182,10 @@ class Sync:
         for team, url, renamed in matched:
             if url not in self.team_obj:
                 continue
-            self._sync_team(team, url, renamed)
+            self._sync_team(team, url, renamed, bc_map or {})
             self._sync_speakers(url, per_team.get(url, []), cats, speaker_names)
 
-    def _sync_team(self, team, url, renamed):
+    def _sync_team(self, team, url, renamed, bc_map):
         norm, obj = self.norm, self.team_obj[url]
         payload, changes = {}, []
         label = self.team_label(url)
@@ -202,6 +202,20 @@ class Sync:
         if code and (obj.get('code_name') or '').strip() != code:
             payload['code_name'] = code
             changes.append(f"code name '{code}'")
+        wanted = [p.strip() for p in re.split(r'[;,|\n]+', team.get('break_categories') or '') if p.strip()]
+        if wanted:                                           # break categories: only ADD missing ones, never remove
+            have = obj.get('break_categories')
+            if not isinstance(have, list):
+                note = "Break categories: the tab's team data has no 'break_categories' field, so they cannot be compared."
+                if note not in self.log['left_alone']:
+                    self.log['left_alone'].append(note)
+            else:
+                have_urls = self._urls(have)
+                add = [bc_map[norm(n)] for n in wanted if norm(n) in bc_map and bc_map[norm(n)] not in have_urls]
+                if add:
+                    payload['break_categories'] = have_urls + list(dict.fromkeys(add))
+                    names = [n for n in wanted if norm(n) in bc_map and bc_map[norm(n)] in add]
+                    changes.append('break categories +' + ', '.join(names))
         if not payload:
             return
         if not self.dry_run:
