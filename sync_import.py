@@ -12,6 +12,14 @@ tab are brought in line with the file:
 When "Also delete teams that are not in the file" is ticked (opt-in), teams on the tab that match no row of the file
 are deleted - with safety stops (see delete_missing).
 
+v1.1 - the same "update" tick now also brings INSTITUTIONS (name, code, region) and ADJUDICATORS (judges: name, email,
+institution, gender, base score, independent, adj_core, notes) that are already on the tab in line with the file:
+  * a judge is recognised by name + institution, else by the same email, else by a near-identical name in the same
+    institution (e.g. "Avenlance" -> "Avenlance*"), and is then updated IN PLACE (never deleted + recreated)
+  * blank cells in the file never erase what is on the tab
+  * "Also delete judges that are not in the file" is a separate opt-in with the same safety stops as for teams
+    (institutions are never deleted)
+
 Nothing here changes TabbycatAPI; PATCH / DELETE are sent through api.session.
 """
 
@@ -60,11 +68,14 @@ def _plain_emoji(text):
 
 
 class Sync:
-    def __init__(self, api, existing, norm, url_id, dry_run, allow_delete, report):
+    def __init__(self, api, existing, norm, url_id, dry_run, allow_delete, report, allow_delete_adj=False):
         self.api, self.norm, self.url_id = api, norm, url_id
         self.dry_run, self.allow_delete = dry_run, allow_delete
+        self.allow_delete_adj = allow_delete_adj
         self.log = report['sync'] = {'teams_updated': [], 'speakers_updated': [], 'removed': [],
-                                     'left_alone': [], 'failed': []}
+                                     'left_alone': [], 'failed': [],
+                                     'institutions_updated': [], 'adjudicators_updated': [],
+                                     'adjudicators_removed': []}
         base, slug = api.base_url, api.slug
         self.base, self.slug = base, slug
 
@@ -77,6 +88,22 @@ class Sync:
             self.team_obj[url] = t
             if t_id is not None:
                 self.team_by_id[t_id] = url
+
+        self.inst_obj = {}                                # institution id -> API object (for institution sync)
+        for i in existing.get('institutions', []):
+            if isinstance(i, dict):
+                i_id = i.get('id') if i.get('id') is not None else url_id(i.get('url'), 'institutions')
+                if i_id is not None:
+                    self.inst_obj[i_id] = i
+        self.adj_obj = {}                                 # judge url -> API object (for judge sync)
+        for a in existing.get('adjudicators', []):
+            if isinstance(a, dict):
+                a_id = a.get('id') if a.get('id') is not None else url_id(a.get('url'), 'adjudicators')
+                a_url = (a.get('url') or '').rstrip('/') or (
+                    f"{base}/api/v1/tournaments/{slug}/adjudicators/{a_id}" if a_id is not None else '')
+                if a_url:
+                    self.adj_obj[a_url] = a
+        self.adj_matched = set()                          # judge urls that match a row of the file
 
         self.site_speakers = {}                           # team url -> [{'name','url','email','gender','categories'}]
         for sp in existing['speakers']:
@@ -341,3 +368,166 @@ class Sync:
                 self.log['removed'].append(name)
             else:
                 self.log['failed'].append((f"Delete team {name}", err))
+
+    # ------------------------------------------------------------------ 4. institutions already on the tab (update)
+    def sync_institution(self, found, inst):
+        """found = (id, url) of the site institution matching the file row `inst` ({'name','code','region',...})."""
+        obj = self.inst_obj.get(found[0])
+        url = str(found[1] or '').rstrip('/')
+        if obj is None or not url or url.startswith('new:'):
+            return
+        clean = lambda v: re.sub(r'\s+', ' ', str(v or '')).strip()
+        payload, changes = {}, []
+        if clean(inst.get('name')) and clean(inst['name']) != clean(obj.get('name')):
+            payload['name'] = clean(inst['name'])
+            changes.append(f"name '{clean(obj.get('name'))}' \u2192 '{payload['name']}'")
+        if not inst.get('auto_code') and clean(inst.get('code')) and clean(inst['code']) != clean(obj.get('code')):
+            payload['code'] = clean(inst['code'])
+            changes.append(f"code '{clean(obj.get('code'))}' \u2192 '{payload['code']}'")
+        if clean(inst.get('region')) and clean(inst['region']) != clean(obj.get('region')):
+            payload['region'] = clean(inst['region'])
+            changes.append(f"region '{payload['region']}'")
+        if not payload:
+            return
+        label = f"{clean(obj.get('name'))} ({clean(obj.get('code'))})"
+        if not self.dry_run:
+            ok, err = _call(self.api, 'PATCH', url, payload)
+            if not ok:
+                self.log['failed'].append((f"Institution {label}", err))
+                return
+        obj.update(payload)
+        self.log['institutions_updated'].append(f"{label}: " + ', '.join(changes))
+
+    # ------------------------------------------------------------------ 5. judges already on the tab (update + optional delete)
+    @staticmethod
+    def _loose(name):
+        """Name for fuzzy matching: no (nickname), no punctuation / asterisks, no case."""
+        name = re.sub(r'\([^)]*\)', '', str(name or ''))
+        return re.sub(r'[^0-9a-z]+', '', name.casefold())
+
+    def sync_adjudicators(self, adjudicators, resolve_institution):
+        """
+        Match every judge row of the file to a judge on the tab and bring that judge in line with the file.
+        Runs BEFORE the normal 'create new judges' step and updates the in-memory records, so a renamed judge is
+        not created a second time.
+        """
+        norm = self.norm
+        rows = []                                     # (file row, inst id or None)
+        for adj in adjudicators:
+            inst_id, _, status = resolve_institution(adj['institution'])
+            if status == 'missing':
+                continue
+            rows.append((adj, inst_id if status == 'ok' else None))
+        site = [(u, o, self.url_id(o.get('institution'), 'institutions')) for u, o in self.adj_obj.items()]
+        pairs, used_f, used_s = [], set(), set()
+
+        def take(i, j):
+            used_f.add(i)
+            used_s.add(j)
+            pairs.append((rows[i], site[j]))
+
+        for i, (adj, inst_id) in enumerate(rows):                     # 1. same name + same institution
+            for j, (u, o, s_inst) in enumerate(site):
+                if j not in used_s and s_inst == inst_id and norm(o.get('name')) == norm(adj['name']):
+                    take(i, j)
+                    break
+        for i, (adj, inst_id) in enumerate(rows):                     # 2. same email
+            em = norm(adj.get('email'))
+            if i in used_f or not em:
+                continue
+            for j, (u, o, s_inst) in enumerate(site):
+                if j not in used_s and norm(o.get('email')) == em:
+                    take(i, j)
+                    break
+        scored = []                                                   # 3. near-identical name, same institution
+        for i, (adj, inst_id) in enumerate(rows):
+            if i in used_f:
+                continue
+            for j, (u, o, s_inst) in enumerate(site):
+                if j in used_s or s_inst != inst_id:
+                    continue
+                a, b = self._loose(adj['name']), self._loose(o.get('name'))
+                if a and b:
+                    scored.append((difflib.SequenceMatcher(None, a, b).ratio(), i, j))
+        for ratio, i, j in sorted(scored, reverse=True):
+            if ratio >= 0.85 and i not in used_f and j not in used_s:
+                take(i, j)
+
+        for (adj, inst_id), (url, obj, s_inst) in pairs:
+            self.adj_matched.add(url)
+            payload, changes = {}, []
+            if adj['name'] and adj['name'] != (obj.get('name') or '').strip():
+                payload['name'] = adj['name']
+                changes.append(f"renamed '{(obj.get('name') or '').strip()}' \u2192 '{adj['name']}'")
+            if adj.get('email') and norm(adj['email']) != norm(obj.get('email')):
+                payload['email'] = adj['email']
+                changes.append(f"email '{obj.get('email') or ''}' \u2192 '{adj['email']}'")
+            if adj['institution'] and inst_id is not None and inst_id != s_inst:
+                _, inst_url, _ = resolve_institution(adj['institution'])
+                if inst_url and not str(inst_url).startswith('new:'):
+                    payload['institution'] = inst_url
+                    changes.append(f"institution \u2192 {adj['institution']}")
+            if adj.get('gender') and adj['gender'] != (obj.get('gender') or ''):
+                payload['gender'] = adj['gender']
+                changes.append(f"gender {adj['gender']}")
+            if adj.get('base_score') is not None:
+                try:
+                    differs = obj.get('base_score') is None or abs(float(obj['base_score']) - adj['base_score']) > 1e-9
+                except (TypeError, ValueError):
+                    differs = True
+                if differs:
+                    payload['base_score'] = adj['base_score']
+                    changes.append(f"base score {adj['base_score']}")
+            for key in ('independent', 'adj_core'):                   # only when the file cell was filled in
+                if adj.get(key + '_given') and key in obj and bool(obj.get(key)) != bool(adj[key]):
+                    payload[key] = bool(adj[key])
+                    changes.append(f"{key} {'TRUE' if adj[key] else 'FALSE'}")
+            if adj.get('notes') and 'notes' in obj and (obj.get('notes') or '').strip() != adj['notes']:
+                payload['notes'] = adj['notes']
+                changes.append('notes')
+            if not payload:
+                continue
+            label = (obj.get('name') or '').strip() or url
+            if not self.dry_run:
+                ok, err = _call(self.api, 'PATCH', url, payload)
+                if not ok:
+                    self.log['failed'].append((f"Judge {label}", err))
+                    continue
+            obj.update(payload)          # keeps the 'already on the tab' checks of the import step in line (also in preview)
+            self.log['adjudicators_updated'].append(f"{label}: " + ', '.join(changes))
+
+        if adjudicators:                 # judges on the tab that match no row of the file are only reported here
+            extra = [(o.get('name') or '').strip() for u, o in self.adj_obj.items() if u not in self.adj_matched]
+            if extra and not self.allow_delete_adj:
+                self.log['left_alone'].append(f"{len(extra)} judge(s) are on the tab but not in your file (not removed): "
+                                              + ', '.join(extra[:30]) + (' ...' if len(extra) > 30 else ''))
+
+    def delete_missing_adjudicators(self, had_rows, failed_rows):
+        if not self.allow_delete_adj:
+            return
+        if not had_rows:
+            self.log['left_alone'].append('Delete judges: skipped, because no judges were uploaded.')
+            return
+        gone = [u for u in self.adj_obj if u not in self.adj_matched]
+        if not gone:
+            return
+        names = [(self.adj_obj[u].get('name') or '').strip() or u for u in gone]
+        if failed_rows:
+            self.log['left_alone'].append(
+                f"Delete judges: skipped, because {failed_rows} judge row(s) of your file failed to import "
+                f"(fix them first, otherwise their judges could be deleted by mistake). Not deleted: " + ', '.join(names))
+            return
+        if len(gone) >= 4 and len(gone) > len(self.adj_obj) / 2:
+            self.log['left_alone'].append(
+                f"Delete judges: skipped, because {len(gone)} of the {len(self.adj_obj)} judges on the tab are not in "
+                f"your file (looks like a partial file). Not deleted: " + ', '.join(names))
+            return
+        for url, name in zip(gone, names):
+            if self.dry_run:
+                self.log['adjudicators_removed'].append(name)
+                continue
+            ok, err = _call(self.api, 'DELETE', url)
+            if ok:
+                self.log['adjudicators_removed'].append(name)
+            else:
+                self.log['failed'].append((f"Delete judge {name}", err))
