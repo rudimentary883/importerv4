@@ -356,12 +356,14 @@
             </div>
 
             <div class="file-section" style="border-left-color:#e0a800;">
-                <h3>🔄 Keep teams already on the tab in sync with the file (optional, Direct API Import only)</h3>
-                <p class="hint">Use this when you upload an <strong>updated</strong> version of a teams file that was imported before.
+                <h3>🔄 Keep teams, judges and institutions already on the tab in sync with the file (optional, Direct API Import only)</h3>
+                <p class="hint">Use this when you upload an <strong>updated</strong> version of a teams, judges or institutions file that was imported before.
                 Tick <strong>Preview only</strong> first and read the "Sync" part of the results.</p>
                 <label class="batch-check">
                     <input type="checkbox" name="sync_update">
-                    <span><strong>Update teams and speakers that are already on the tab</strong> &mdash; fills in emojis and code names,
+                    <span><strong>Update teams, speakers, judges and institutions that are already on the tab</strong> &mdash; judges: renamed names, changed
+                    email / institution / gender are changed on the existing judge (recognised by name, email or a near-identical name in the
+                    same institution); institutions: region, name and code. Blank cells never erase anything. Teams: fills in emojis and code names,
                     renames a team that has the same speakers under a new name, renames a speaker whose lineup changed
                     (the existing speaker record is changed, not deleted), and adds email / gender / categories that are
                     missing. Nothing is deleted.</span>
@@ -371,6 +373,12 @@
                     <span><strong>Also delete teams that are not in the file</strong> &mdash; <strong style="color:#c0392b;">cannot be undone</strong>.
                     Ticking this also turns on the update above. Nothing is deleted if some rows of the file failed, or if the file
                     would remove more than half of the teams (it looks like a partial file). Do not use once a draw has been made.</span>
+                </label>
+                <label class="batch-check">
+                    <input type="checkbox" name="sync_delete_adj">
+                    <span><strong>Also delete judges that are not in the judges file</strong> &mdash; <strong style="color:#c0392b;">cannot be undone</strong>.
+                    Ticking this also turns on the update above. Same safety stops as for teams. Institutions are never deleted.
+                    Do not use once a draw has been made.</span>
                 </label>
             </div>
 
