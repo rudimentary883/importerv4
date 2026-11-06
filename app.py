@@ -1,4 +1,6 @@
 """
+Tabbycat API Importer v5.2 - the opt-in sync now also updates INSTITUTIONS (name, code, region) and JUDGES (renamed, email,
+  institution, gender, ...) already on the tab, and can optionally delete judges that are not in the file.
 Tabbycat API Importer v5.1 - adds an OPT-IN sync step (sync_import.py): update teams / speakers that are already on the
   tab (emoji, code name, renamed teams, changed speakers) and optionally delete teams that are not in the file.
 Tabbycat API Importer v5.0 - adds the combined "Teams + Speakers" file (one row = team + speakers laid out horizontally,
@@ -547,7 +549,10 @@ def process_adjudicators(rows):
             'base_score': parse_float_or_none(row.get('base_score')),
             'independent': parse_bool(row.get('independent')),
             'adj_core': parse_bool(row.get('adj_core')),
-            'notes': clean_string(row.get('notes', ''))
+            'notes': clean_string(row.get('notes', '')),
+            # sync only: was the cell filled in? (a blank cell must not switch a flag off on the tab)
+            'independent_given': clean_string(row.get('independent', '')) != '',
+            'adj_core_given': clean_string(row.get('adj_core', '')) != ''
         })
     return results, errors
 
@@ -768,8 +773,9 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
 
     # opt-in sync (update existing teams / speakers, optionally delete teams missing from the file)
     syncer = None
-    if sync and (sync.get('update') or sync.get('delete')):
-        syncer = Sync(api, existing, norm, url_id, dry_run, bool(sync.get('delete')), report)
+    if sync and (sync.get('update') or sync.get('delete') or sync.get('delete_adj')):
+        syncer = Sync(api, existing, norm, url_id, dry_run, bool(sync.get('delete')), report,
+                      allow_delete_adj=bool(sync.get('delete_adj')))
 
     def failure_reason(errors_before):
         if len(api.stats['errors']) > errors_before:
@@ -791,6 +797,8 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
         if found:
             resolved[norm(original_code)] = found
             report['institutions']['existing'].append(label)
+            if syncer:
+                syncer.sync_institution(found, inst)
             continue
         if inst.get('auto_code'):
             code, n = inst['code'], 2
@@ -1042,6 +1050,8 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
             report['speakers']['failed'].append((label, failure_reason(before)))
 
     # ------------------------------------------------------------------ adjudicators
+    if syncer:      # bring judges already on the tab in line with the file first (renames, email ...), so none is created twice
+        syncer.sync_adjudicators(adjudicators, resolve_institution)
     adj_keys = set()
     adj_emails = set()
     for a in existing['adjudicators']:
@@ -1089,6 +1099,7 @@ def run_batch_import(api, institutions, teams, adjudicators, speakers, max_speak
 
     if syncer:
         syncer.delete_missing({m[1] for m in matched}, bool(teams), len(report['teams']['failed']))
+        syncer.delete_missing_adjudicators(bool(adjudicators), len(report['adjudicators']['failed']))
 
     return report, new_rows
 
@@ -1195,7 +1206,8 @@ def upload():
     debate_format = request.form.get('debate_format', 'bp')
     max_speakers = FORMAT_MAX_SPEAKERS.get(debate_format, 3)
     dry_run = request.form.get('dry_run') == 'on'
-    sync = {'update': request.form.get('sync_update') == 'on', 'delete': request.form.get('sync_delete') == 'on'}
+    sync = {'update': request.form.get('sync_update') == 'on', 'delete': request.form.get('sync_delete') == 'on',
+            'delete_adj': request.form.get('sync_delete_adj') == 'on'}
 
     try:
         inst_rows = read_optional_upload('institutions')
