@@ -237,10 +237,10 @@
     <div class="card">
         <h2>Sync with your file {% if dry_run %}(preview){% endif %}</h2>
         {% set sy = report.sync %}
-        {% if not (sy.teams_updated or sy.speakers_updated or sy.removed or sy.left_alone or sy.failed) %}
+        {% if not (sy.teams_updated or sy.speakers_updated or sy.removed or sy.institutions_updated or sy.adjudicators_updated or sy.adjudicators_removed or sy.left_alone or sy.failed) %}
             <p>Everything already matches your file.</p>
         {% endif %}
-        {% for key, label in [('teams_updated','Teams updated / renamed'),('speakers_updated','Speakers updated / renamed'),('removed','Teams deleted')] %}
+        {% for key, label in [('institutions_updated','Institutions updated'),('adjudicators_updated','Judges updated / renamed'),('teams_updated','Teams updated / renamed'),('speakers_updated','Speakers updated / renamed'),('removed','Teams deleted'),('adjudicators_removed','Judges deleted')] %}
             {% if sy[key] %}
             <details open><summary>{{ label }}{% if dry_run %} &mdash; would be done{% endif %} ({{ sy[key]|length }})</summary>
                 <ul>{% for item in sy[key][:200] %}<li>{{ item }}</li>{% endfor %}</ul>
