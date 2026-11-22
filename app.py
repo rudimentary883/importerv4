@@ -1364,6 +1364,10 @@ register_conflicts(app, TabbycatAPI, url_id, build_institution_index, find_exist
 from availability_import import register_availability
 register_availability(app)
 
+# Export the tab as import-ready CSV files (/export-tab) - separate module
+from tab_export import register_tab_export
+register_tab_export(app)
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
