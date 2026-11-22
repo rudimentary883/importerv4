@@ -1360,6 +1360,10 @@ def download(download_id, file_type):
 from conflicts import register_conflicts
 register_conflicts(app, TabbycatAPI, url_id, build_institution_index, find_existing_institution)
 
+# Judge availability per round from the availability form (/availability) - separate module
+from availability_import import register_availability
+register_availability(app)
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
