@@ -191,7 +191,8 @@
 <body>
     <h1>Tabbycat Importer <span style="font-size:14px;color:#888;">v5.0</span></h1>
     <p class="subtitle">Import institutions, teams, speakers, and adjudicators into Tabbycat &mdash; in as many batches as you need
-        &middot; <a href="/conflicts">Import conflicts &rarr;</a></p>
+        &middot; <a href="/conflicts">Import conflicts &rarr;</a>
+        &middot; <a href="/availability">Judge availability per round &rarr;</a></p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
@@ -365,8 +366,9 @@
                     email / institution / gender are changed on the existing judge (recognised by name, email or a near-identical name in the
                     same institution); institutions: region, name and code. Blank cells never erase anything. Teams: fills in emojis and code names,
                     renames a team that has the same speakers under a new name, renames a speaker whose lineup changed
-                    (the existing speaker record is changed, not deleted), and adds email / gender / categories that are
-                    missing. Nothing is deleted.</span>
+                    (the existing speaker record is changed, not deleted), and adds email / gender that are missing.
+                    <strong>Break categories and speaker categories are made to match the file</strong>: a category that is not in the file is
+                    removed from that team / speaker (a blank category cell leaves them alone). Teams and speakers are never deleted here.</span>
                 </label>
                 <label class="batch-check">
                     <input type="checkbox" name="sync_delete">
